@@ -7,7 +7,7 @@
 
 ![tokentab — cash out, allocated cost and value over the last 30 days, with daily value per day](docs/dashboard.png)
 
-**[Live demo →](https://4242labs.github.io/tokentab/)** — 100% synthetic data, no store behind it.
+**[Live demo →](https://tokentab.42labs.io/)** — 100% synthetic data, no store behind it.
 
 > *What AI actually costs — across providers, projects and machines, with the
 > flat-rate plans included rather than excluded.*
