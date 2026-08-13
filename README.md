@@ -239,13 +239,6 @@ production build (`npm run build`) never includes it.
 * **Fees are what you tell it.** Nothing reads your invoices. A wrong
   `monthly_usd` or `cycle_day` scales every cash and allocated figure.
 
-## Contributing
-
-Passively maintained — issues and small, focused pull requests are welcome and
-genuinely read, but expect replies in weeks rather than days. See
-[CONTRIBUTING.md](CONTRIBUTING.md). If you need it to move faster, fork it: the
-AGPL grants you exactly that.
-
 ## License
 
 Open source — [AGPL-3.0](LICENSE). Commercial — contact ahoy@42labs.io.
