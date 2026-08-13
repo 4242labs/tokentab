@@ -5,6 +5,10 @@
 [![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
 [![Maintenance](https://img.shields.io/badge/maintenance-passively--maintained-yellowgreen.svg)](CONTRIBUTING.md)
 
+![tokentab — cash out, allocated cost and value over the last 30 days, with daily value per day](docs/dashboard.png)
+
+**[Live demo →](https://4242labs.github.io/tokentab/)** — 100% synthetic data, no store behind it.
+
 > *What AI actually costs — across providers, projects and machines, with the
 > flat-rate plans included rather than excluded.*
 
@@ -30,6 +34,8 @@ A flat plan has no per-call price, so any per-project figure for it is
 **allocated**. The dashboard never presents an allocated number as cash: apply a
 project (or repo/model/machine/source) filter and the *Cash out* card switches to
 the allocated figure, turns amber, goes dashed and carries an `ALLOCATED` badge.
+
+![One project selected: the Cash out card has switched to the allocated share, amber and dashed, with an ALLOCATED badge and a note explaining why](docs/allocated.png)
 
 **Allocation basis:** total tokens (input + output + cache read + cache write) per
 project, per billing cycle. **Billing periods are plan cycles** (`cycle_day` →
@@ -192,6 +198,27 @@ Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
   serves directly. **The serving host never needs Node** — only the machine that
   builds does. Styling comes from the 42labs design system: adopted shadcn/ui
   primitives, semantic tokens only.
+
+## The demo
+
+```sh
+cd web && npm ci && npm run build:demo   # -> web/dist/, no server needed
+```
+
+`build:demo` runs `tools/make-demo.py` first. That script invents a fleet —
+accounts, projects, machines, three subscriptions including a cancelled one —
+and then asks **the real engine** for one summary per view the demo can reach:
+each preset, alone and with each single filter. The demo is a lookup over those
+answers, so there is no second implementation of the pricing or allocation rules
+to drift out of step with the product.
+
+Two filters at once are not precomputed (the matrix squares); the demo drops the
+extras and says so on the page. Filter combinations aside, every number in the
+demo is what tokentab would actually report for that data.
+
+The dataset is generated, not committed, because the presets are relative to
+today — a fixture baked in June would open on an empty billing cycle. The
+production build (`npm run build`) never includes it.
 
 ## Known limits
 
