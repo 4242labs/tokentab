@@ -94,7 +94,7 @@ export default function App() {
         <header className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
           <div className="mx-auto flex max-w-[var(--w-xl)] flex-wrap items-center gap-x-4 gap-y-2 px-[var(--pad-x)] py-4">
             <BrandMark className="size-5" />
-            <h1 className="font-heading text-lg font-semibold tracking-tight">tokentab</h1>
+            <h1 className="font-heading text-lg font-semibold tracking-tight">TokenTab</h1>
             {data && (
               <span className="font-mono text-xs text-muted-foreground">
                 {shortDay(data.period.from)} – {shortDay(data.period.to)}
