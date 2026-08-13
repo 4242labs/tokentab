@@ -60,17 +60,18 @@ export function BreakdownTable({
                 isActive && 'bg-accent text-accent-foreground',
               )}
             >
-              <TableCell className="relative max-w-0 truncate font-medium">
-                {/* Share of the largest row, drawn behind the label. */}
+              <TableCell className="relative max-w-0 font-medium">
+                {/* Share of the largest row, drawn behind the label. Stays at
+                    z-0 rather than -z-10: a negative index would put it behind
+                    the card's own surface and render it invisible. */}
                 <span
                   aria-hidden
-                  className="absolute inset-y-1 left-0 -z-10 rounded-[var(--r-2)] opacity-15"
-                  style={{
-                    width: `${Math.max(2, (r.value / max) * 100)}%`,
-                    backgroundColor: 'var(--emerald)',
-                  }}
+                  className="absolute inset-y-1 left-0 z-0 rounded-[var(--r-2)] bg-money-value opacity-15"
+                  style={{ width: `${Math.max(2, (r.value / max) * 100)}%` }}
                 />
-                <span className="relative">{r.key}</span>
+                {/* block + truncate on the label itself; on the cell it would
+                    clip the absolutely-positioned bar instead of the text. */}
+                <span className="relative z-10 block truncate">{r.key}</span>
               </TableCell>
               <TableCell className="text-right tabular-nums">{usd(r.value)}</TableCell>
               <TableCell className="text-right tabular-nums text-muted-foreground">

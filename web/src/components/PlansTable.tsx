@@ -81,12 +81,11 @@ export function PlansTable({
               <TableCell className="text-right tabular-nums text-muted-foreground">
                 {usd(r.fee)}
               </TableCell>
-              {/* --accent-solid, not --accent: bridge.css shadows the latter with
-                  the shadcn soft-highlight background. See HeadlineCards. */}
-              <TableCell className="text-right tabular-nums" style={{ color: 'var(--accent-solid)' }}>
+              {/* Same money colours as the headline cards — see bridge.css. */}
+              <TableCell className="text-right tabular-nums text-money-cash">
                 {usd(r.cash)}
               </TableCell>
-              <TableCell className="text-right tabular-nums" style={{ color: 'var(--amber)' }}>
+              <TableCell className="text-right tabular-nums text-money-allocated">
                 {usd(r.allocated)}
               </TableCell>
             </TableRow>

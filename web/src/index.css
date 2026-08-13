@@ -43,6 +43,20 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
+  /* Brand colour, matching the DS's own `--color-logo: var(--logo)`. Without
+     this alias the adopted brand-mark's `text-logo` resolves to nothing and
+     the mark falls back to the foreground — i.e. a black/white asterisk
+     instead of Burnt Orange on light and Mint on dark. */
+  --color-logo: var(--logo);
+
+  /* The three money figures. Aliased (not read as --emerald/--amber direct) so
+     each one can take the DS's on-dark emphasis variant under theme-dark — see
+     bridge.css. --money-cash is --accent-solid, NOT --accent: bridge.css
+     shadows --accent with the shadcn soft-highlight background. */
+  --color-money-cash: var(--money-cash);
+  --color-money-allocated: var(--money-allocated);
+  --color-money-value: var(--money-value);
+
   /* shadcn sidebar contract -> design tokens (see bridge.css). */
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);

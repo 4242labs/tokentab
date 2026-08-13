@@ -5,13 +5,12 @@ import type { Headline } from '@/lib/api'
 import { num, short, usd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-/** Semantic token vars, not literals — the palette flips with the theme.
- *  Cash uses `--accent-solid`, not `--accent`: bridge.css deliberately shadows
- *  `--accent` with the shadcn concept (a soft highlight background), so reading
- *  it here would paint the headline figure in near-white. */
-const CASH = 'var(--accent-solid)'
-const ALLOC = 'var(--amber)'
-const VALUE = 'var(--emerald)'
+/** The three money colours, defined once in bridge.css against DS status tokens
+ *  and re-declared under `theme-dark` so each picks up its on-dark emphasis
+ *  variant. Never a literal, and never `--emerald`/`--amber` read direct. */
+const CASH = 'text-money-cash'
+const ALLOC = 'text-money-allocated'
+const VALUE = 'text-money-value'
 
 function Figure({
   label,
@@ -24,6 +23,7 @@ function Figure({
 }: {
   label: string
   value: string
+  /** A `text-money-*` utility; omitted leaves the figure at the foreground. */
   color?: string
   foot: string
   badge?: string
@@ -48,12 +48,7 @@ function Figure({
         </CardTitle>
       </CardHeader>
       <CardContent className="px-5">
-        <p
-          className="font-heading text-3xl font-semibold tabular-nums"
-          style={color ? { color } : undefined}
-        >
-          {value}
-        </p>
+        <p className={cn('font-heading text-3xl font-semibold tabular-nums', color)}>{value}</p>
         <p className="mt-1 text-xs text-muted-foreground">{foot}</p>
       </CardContent>
     </Card>

@@ -95,6 +95,25 @@
      but the shadcn utility is `border-sidebar-border`, which needs the alias,
      so define it via a distinct name. It is NOT a self-reference. */
   --sidebar-border: var(--border);
+
+  /*
+   * tokentab's own semantic layer: the three money figures, each mapped to a DS
+   * status token. Declared here rather than read inline so the theme can swap in
+   * the DS's on-dark emphasis variants (see the body.theme-dark block below) —
+   * the token file marks `--emerald`/`--amber` as "solid", `--*-dark` as
+   * "emphasis on light" and `--*-light` as "emphasis on dark", and these are
+   * large headline numerals where that distinction is the whole point.
+   *
+   * Cash is the brand accent because it is the real number; allocated is amber
+   * (warning) because it is an accounting split and should read as a caveat,
+   * not a fact; value is blue (info) because it is a reference price, not money
+   * that moved. Emerald was the obvious first pick for value and is wrong: on
+   * the dark palette the brand accent is Mint, so a green value figure sat one
+   * hue away from the cash figure and the two stopped being tellable apart.
+   */
+  --money-cash: var(--accent-solid);
+  --money-allocated: var(--amber-dark);
+  --money-value: var(--blue-dark);
 }
 
 /*
@@ -144,4 +163,10 @@ body.theme-dark {
   --sidebar-accent-foreground: var(--fg);
   --sidebar-ring: var(--accent-focus);
   --sidebar-border: var(--border);
+
+  /* Same three, on the dark palette: --accent-solid already flips to Mint by
+     itself, while amber and blue need their explicit on-dark variants. */
+  --money-cash: var(--accent-solid);
+  --money-allocated: var(--amber-light);
+  --money-value: var(--blue-light);
 }

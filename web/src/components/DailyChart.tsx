@@ -17,9 +17,7 @@ function ChartTooltip({ active, payload }: { active?: boolean; payload?: { paylo
   return (
     <div className="rounded-[var(--r-2)] border border-border bg-popover px-3 py-2 text-xs shadow-md">
       <p className="font-mono font-medium">{shortDay(d.day)}</p>
-      <p className="mt-1 tabular-nums" style={{ color: 'var(--emerald)' }}>
-        {usd(d.value)}
-      </p>
+      <p className="mt-1 tabular-nums text-money-value">{usd(d.value)}</p>
       <p className="tabular-nums text-muted-foreground">{short(d.tokens)} tokens</p>
     </div>
   )
@@ -48,8 +46,12 @@ export function DailyChart({ days }: { days: DayRow[] }) {
           width={52}
           tick={{ fill: 'var(--fg-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}
         />
+        {/* recharts takes CSS values, not utility classes. These are the same
+            theme-aware vars the `text-money-*` utilities resolve to; both are
+            re-declared under body.theme-dark, so the SVG inherits the dark
+            values without a second code path. */}
         <RechartsTooltip content={<ChartTooltip />} cursor={{ fill: 'var(--accent-soft)' }} />
-        <Bar dataKey="value" fill="var(--emerald)" radius={2} isAnimationActive={false} />
+        <Bar dataKey="value" fill="var(--money-value)" radius={2} isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer>
   )
