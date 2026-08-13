@@ -1,0 +1,14 @@
+# Real configuration. plans.json names the accounts you are actually signed in
+# as — start from plans.example.json and keep your copy out of the repo.
+/plans.json
+
+# Local store and scan state (see TOKENTAB_DB / TOKENTAB_STATE).
+*.db
+*.db-wal
+*.db-shm
+
+# Web build artefacts. dist/ ships to the serving host by scp, not by git.
+web/node_modules/
+web/dist/
+
+.DS_Store

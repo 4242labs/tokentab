@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy to plans.json and fill in your own values — plans.json is gitignored because the accounts map holds real login addresses. Flat-rate subscriptions have NO per-call cost, so their per-project figures are ALLOCATED (fee split by token share within the billing period), never measured. 'plans' entries are TEMPLATES, one per plan family — the actual subscriptions are (family x account) pairs discovered from the data, so adding or cancelling an account needs no code change. 'accounts' only carries per-account overrides; an account with no entry bills at its family's default fee and is flagged in the UI.",
+
+  "plans": {
+    "claude-max": {
+      "label": "Claude Max",
+      "provider": "anthropic",
+      "monthly_usd": 200.0,
+      "cycle_day": 7,
+      "active_from": "2026-01-01",
+      "active_to": null,
+      "sources": ["claude_code"]
+    },
+    "chatgpt": {
+      "label": "ChatGPT (Codex)",
+      "provider": "openai",
+      "monthly_usd": 0.0,
+      "cycle_day": 1,
+      "active_from": "2026-01-01",
+      "active_to": null,
+      "sources": ["codex"]
+    }
+  },
+
+  "accounts": {
+    "_comment": "Keyed by the address each CLI is signed in as. Per-account overrides, all optional: label, monthly_usd, cycle_day, active_from, active_to. active_to: 'auto' means the subscription was cancelled on an unknown date — it is inferred from the account's last usage and shown as inferred (trailing '?') rather than guessed silently.",
+    "you@example.com": {
+      "label": "personal"
+    },
+    "you@work.example": {
+      "label": "work",
+      "monthly_usd": 100.0
+    },
+    "old@example.com": {
+      "label": "cancelled",
+      "active_to": "auto"
+    }
+  },
+
+  "hosts": {
+    "_comment": "Optional display names. Any host not listed uses its reported hostname, uppercased.",
+    "laptop": "LAPTOP",
+    "server": "SERVER"
+  },
+
+  "roots": {
+    "_comment": "Path roots used for project/repo attribution. First segment under a root = project; second = repo; '<project>/worktrees/<repo>--<branch>' resolves back to <repo>. Anything outside every root is attributed to 'ad-hoc'.",
+    "paths": ["~/code", "~/work"]
+  }
+}
