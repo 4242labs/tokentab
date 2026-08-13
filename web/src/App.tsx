@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import {
+  DEMO,
   fetchFilters,
   fetchSummary,
   type Filters,
@@ -116,6 +117,19 @@ export default function App() {
             onChange={setFilter}
             onReset={reset}
           />
+
+          {DEMO && (
+            <Alert>
+              <Info />
+              <AlertDescription>
+                <span className="font-medium text-foreground">Demo — everything here is
+                invented.</span>{' '}
+                Synthetic accounts, projects and machines, precomputed by the real engine. Nobody's
+                spend is on this page. Filters work one at a time; the live dashboard combines them
+                freely.
+              </AlertDescription>
+            </Alert>
+          )}
 
           {error && (
             <Alert variant="destructive">

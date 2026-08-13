@@ -16,3 +16,6 @@ web/dist/
 # Byte-compiled
 __pycache__/
 *.pyc
+
+# The demo dataset is generated (tools/make-demo.py), not authored.
+web/public/demo.json
