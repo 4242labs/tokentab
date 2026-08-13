@@ -5,7 +5,7 @@
 [![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
 [![Maintenance](https://img.shields.io/badge/maintenance-passively--maintained-yellowgreen.svg)](CONTRIBUTING.md)
 
-![tokentab — cash out, allocated cost and value over the last 30 days, with daily value per day](docs/dashboard.png)
+![TokenTab — cash out, allocated cost and value over the last 30 days, with daily value per day](docs/dashboard.png)
 
 **[Live demo →](https://tokentab.42labs.io/)** — 100% synthetic data, no store behind it.
 
