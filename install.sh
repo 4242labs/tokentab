@@ -4,8 +4,8 @@
 #
 # Run it from a checkout on the target host:
 #
-#   ./install.sh --collect --server palpatine   # a collecting host
-#   ./install.sh --serve --bind 100.114.72.43 --collect   # the server
+#   ./install.sh --collect --server <server-host>          # a collecting host
+#   ./install.sh --serve --bind <addr> --collect           # the server
 #
 # It lays out four directories with four different lifetimes, so an upgrade is
 # "re-run this script" and never risks the two things that cannot be rebuilt:
@@ -114,7 +114,7 @@ fi
 cat > "$BIN/tokentab" <<EOF
 #!/bin/sh
 # tokentab — unified AI spend tracking. Installed by install.sh; edits are lost
-# on the next run. Source: https://github.com/42piratas/tokentab
+# on the next run. Source: https://github.com/4242labs/tokentab
 exec $PYTHON "$LIB/tokentab.py" "\$@"
 EOF
 chmod 755 "$BIN/tokentab"

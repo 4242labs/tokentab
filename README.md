@@ -1,7 +1,12 @@
+<img src=".github/logomark.svg" alt="42labs" width="56" />
+
 # tokentab
 
-**What AI actually costs — across providers, projects and machines, with the
-flat-rate plans included rather than excluded.**
+[![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
+[![Maintenance](https://img.shields.io/badge/maintenance-passively--maintained-yellowgreen.svg)](CONTRIBUTING.md)
+
+> *What AI actually costs — across providers, projects and machines, with the
+> flat-rate plans included rather than excluded.*
 
 Every usage dashboard you can buy meters API keys. Almost nobody pays for coding
 agents that way any more: the spend is a handful of $20–$200 subscriptions, and
@@ -206,3 +211,17 @@ Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
   hourly and treat the database as the thing worth backing up.
 * **Fees are what you tell it.** Nothing reads your invoices. A wrong
   `monthly_usd` or `cycle_day` scales every cash and allocated figure.
+
+## Contributing
+
+Passively maintained — issues and small, focused pull requests are welcome and
+genuinely read, but expect replies in weeks rather than days. See
+[CONTRIBUTING.md](CONTRIBUTING.md). If you need it to move faster, fork it: the
+AGPL grants you exactly that.
+
+## License
+
+Open source — [AGPL-3.0](LICENSE). Commercial — contact ahoy@42labs.io.
+
+---
+If it earned its keep, [coffee is appreciated](https://buymeacoffee.com/42piratas). ☕
