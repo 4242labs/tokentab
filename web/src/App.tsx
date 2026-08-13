@@ -7,6 +7,7 @@ import { DailyChart } from '@/components/DailyChart'
 import { FilterBar } from '@/components/FilterBar'
 import { HeadlineCards } from '@/components/HeadlineCards'
 import { PlansTable } from '@/components/PlansTable'
+import { SiteFooter } from '@/components/SiteFooter'
 import { ThemeSwitch } from '@/components/ThemeSwitch'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -193,6 +194,8 @@ export default function App() {
             the same usage at published API list rates.
           </p>
         </main>
+
+        <SiteFooter />
       </div>
     </TooltipProvider>
   )
