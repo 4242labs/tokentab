@@ -12,3 +12,7 @@ web/node_modules/
 web/dist/
 
 .DS_Store
+
+# Byte-compiled
+__pycache__/
+*.pyc

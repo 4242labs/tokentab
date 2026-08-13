@@ -123,17 +123,34 @@ only Python:
 cd web && npm ci && npm run build     # -> web/dist/
 ```
 
-Deploy to a host (nothing but files):
+Then run the installer on each host, from a checkout of this repo:
 
 ```sh
-mkdir -p ~/.local/share/tokentab ~/.local/bin
-scp -r tokentab.py rates.json plans.json web <host>:~/.local/share/tokentab/
-printf '#!/bin/sh\nexec /usr/bin/python3 "$HOME/.local/share/tokentab/tokentab.py" "$@"\n' \
-  > ~/.local/bin/tokentab && chmod +x ~/.local/bin/tokentab
-tokentab push --server <collector> --all     # one-off backfill
+./install.sh --serve --bind <tailnet-addr> --collect   # the server
+./install.sh --collect --server <server-host>          # every other host
+tokentab push --server <server-host> --all             # one-off backfill
 ```
 
-Then add an hourly timer (a systemd user unit, or a launchd agent on macOS).
+It is idempotent — re-running it *is* the upgrade — and it writes the units for
+you (systemd `--user` on Linux, a launchd agent on macOS).
+
+### Layout
+
+Four directories, four lifetimes. An upgrade replaces the first and touches
+nothing else:
+
+| Path | Holds | On upgrade |
+|:--|:--|:--|
+| `~/.local/share/tokentab/` | `tokentab.py`, `web/dist/`, `VERSION` | replaced wholesale |
+| `~/.config/tokentab/` | `rates.json`, `plans.json` | `rates.json` refreshed from the repo; **`plans.json` never overwritten** |
+| `~/.local/share/tokentab/tokentab.db` | the store | untouched |
+| `~/.local/state/tokentab/` | scan state, collector log | untouched |
+
+`VERSION` records the deployed `git describe` and timestamp, so a host can be
+diffed against the repo instead of taken on trust.
+
+Run from a checkout with no install, the repo directory *is* the config
+directory — `./tokentab.py report` works with nothing set up.
 
 ## Commands
 

@@ -50,7 +50,24 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("TOKENTAB_STATE", "~/.local/state/tokentab")).expanduser()
 DB_PATH = Path(os.environ.get("TOKENTAB_DB", "~/.local/share/tokentab/tokentab.db")).expanduser()
-CONFIG_DIR = Path(os.environ.get("TOKENTAB_CONFIG", str(HERE))).expanduser()
+
+
+def _config_dir() -> Path:
+    """Where rates.json and plans.json live.
+
+    Installed, config sits in XDG config and the code in ~/.local/share, so an
+    upgrade can replace the code wholesale without taking the accounts with it.
+    Run from a checkout there is no XDG copy, and the repo dir is the config
+    dir — which is what makes `./tokentab.py report` work with no install.
+    """
+    env = os.environ.get("TOKENTAB_CONFIG")
+    if env:
+        return Path(env).expanduser()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser() / "tokentab"
+    return xdg if (xdg / "rates.json").exists() else HERE
+
+
+CONFIG_DIR = _config_dir()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
