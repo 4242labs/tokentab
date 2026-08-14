@@ -19,3 +19,9 @@ __pycache__/
 
 # The demo dataset is generated (tools/make-demo.py), not authored.
 web/public/demo.json
+
+# Claude Code -- local-only files stay untracked (kit hygiene)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/hooks/*.local.json
+.worktrees/
