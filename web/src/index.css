@@ -43,11 +43,31 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
+  /* DS 0.9.0. Tailwind resolves `border-*` against `--color-*`, so these read
+     as `border-border-subtle` / `border-border-control` — the same doubled
+     shape as `border-border` above. The re-pulled Card and Select both write
+     `border-border-subtle`, so this alias is required, not decorative. */
+  --color-border-subtle: var(--border-subtle);
+  --color-border-control: var(--border-control);
+
+  /* The alternating page band (DS 0.8.0). Never --surface-muted: muted is the
+     component well and, on dark, the hover rung — a page-width section painted
+     with it reads as one giant well and any hover inside lands on its own
+     background. */
+  --color-surface-subtle: var(--surface-subtle);
+
   /* Brand colour, matching the DS's own `--color-logo: var(--logo)`. Without
      this alias the adopted brand-mark's `text-logo` resolves to nothing and
      the mark falls back to the foreground — i.e. a black/white asterisk
      instead of Burnt Orange on light and Mint on dark. */
   --color-logo: var(--logo);
+
+  /* The other half of the lockup. Canon: the MARK carries the brand colour
+     (--logo), the WORDMARK stays neutral (--logo-word — the maximal-contrast
+     ground inverted, NOT --fg). Every 42labs lockup follows it. TokenTab's
+     header wordmark was on --fg, which is warm-900 on light; --logo-word is
+     ink-950, the same cool near-black the other lockups use. */
+  --color-logo-word: var(--logo-word);
 
   /* The three money figures. Aliased (not read as --emerald/--amber direct) so
      each one can take the DS's on-dark emphasis variant under theme-dark — see
@@ -74,6 +94,18 @@
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
+
+  /* Elevation — DS 0.9.0. Tailwind owns the `--shadow-*` namespace, so the DS
+     names its raw rungs `--elev-*` and consumers pin them into Tailwind's slots
+     (the same call the DS makes for spacing). Every primitive already writing
+     shadow-xs/sm/md inherits DS elevation with no component edit. Required, not
+     optional: without it the re-pulled Card draws a DS-subtle border underneath
+     Tailwind's default, harsher shadow — worse than either state alone.
+     2xs / lg / xl / 2xl stay at Tailwind's defaults; nothing here uses them. */
+  --shadow-xs: var(--elev-0);
+  --shadow-sm: var(--elev-1);
+  --shadow-md: var(--elev-2);
+  --shadow-lg: var(--elev-3);
 
   --animate-pulse-skeleton: pulse-skeleton 1.5s ease-in-out infinite;
 }
