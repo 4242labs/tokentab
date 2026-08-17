@@ -1,0 +1,46 @@
+name: DS compliance
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ds:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20 # matches pages.yml; this repo has no .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps (the Gate-3 primitive diff resolves through shadcn)
+        run: npm ci
+
+      - name: Fetch the design-system check (it lives in the private DS repo)
+        uses: actions/checkout@v4
+        with:
+          repository: 4242labs/design-system
+          # Pinned to the SHA, not v0.6.2: the newest tag predates #72, which
+          # fixed a skipped component diff reporting "0 present" — i.e. the tag
+          # would under-report exactly the case this repo hits.
+          ref: ac67d7f4a76ca4e0f70852ac3c6c815c72d760b6
+          token: ${{ secrets.DS_ACTION_TOKEN }} # org secret, visibility ALL
+          path: web/.ds-action
+
+      # Run the check from `web/` (not via the composite action) so shadcn's
+      # Gate-3 resolve sees this app's components.json. The action's own step
+      # runs from the repo root, which has no components.json in a web/ layout.
+      - name: DS compliance — tokens, primitives, own-code drift
+        run: node .ds-action/.github/actions/ds-compliance/consumer-check.mjs
+        env:
+          DS_TOKENS_PIN: "0.9.0"
+          DS_TOKENS_FILE: "src/ds-tokens.css"
+          DS_UI_DIR: "src/components/ui"
+          DS_SCAN: "src"

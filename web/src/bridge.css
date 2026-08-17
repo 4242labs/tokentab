@@ -73,9 +73,14 @@
    * already defines `--border` with exactly the intended value (incl. the
    * `body.theme-dark` override), so no re-declaration is needed here — the
    * alias is satisfied by omission. `--input` is a distinct name, so
-   * `var(--border)` below reads the token value with no cycle.
+   * `var(--border-control)` below reads the token value with no cycle.
    */
-  --input: var(--border);
+  /* --border-control, not --border (DS 0.9.0). `--input` is the control
+     boundary — the Select trigger, the outline Button — and WCAG 1.4.11 wants
+     3:1 for the visual information identifying a component. --border is warm-300
+     at 1.38:1 on white; --border-control is warm-500 at 3.07:1. Card and popover
+     EDGES are out of 1.4.11's scope and correctly keep --border-subtle. */
+  --input: var(--border-control);
   --ring: var(--accent-focus);
 
   --radius: var(--r-3);
@@ -152,7 +157,9 @@ body.theme-dark {
   --destructive: var(--red);
   --destructive-foreground: var(--warm-0);
 
-  --input: var(--border);
+  /* ink-600 #6C7C89 — 4.00:1 on the ink-910 card. Was --border (ink-800), a
+     1.4.11 fail on dark too. */
+  --input: var(--border-control);
   --ring: var(--accent-focus);
 
   --sidebar: var(--surface-alt);
