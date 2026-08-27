@@ -33,6 +33,7 @@ Stdlib only, like the rest of tokentab.
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -45,7 +46,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RATES = HERE.parent / "rates.json"
+RATES = HERE.parent / "rates.json"   # the repo copy: rates.json is repo-owned, and
+                                     # install.sh copies it out, so the repo wins
 SOURCE = ("https://raw.githubusercontent.com/BerriAI/litellm/main/"
           "model_prices_and_context_window.json")
 
@@ -60,6 +62,25 @@ FIELDS = {
                        "cache_creation_input_token_cost"),
     "cache_read": ("cache_read_input_token_cost",),
 }
+
+def in_use() -> Path | None:
+    """The rates.json the installed tokentab prices from, if it is a different file.
+
+    `install.sh` copies rates.json into XDG config, and `tokentab.py` reads that
+    copy in preference to the repo — so editing the repo file changes nothing
+    the CLI does until the next install. A tool whose whole point is catching a
+    stale price file must not be the reason one goes unnoticed, so it says which
+    file it is editing and which one is being priced from. Asking tokentab
+    rather than re-deriving the rule keeps the two from drifting apart.
+    """
+    src = HERE.parent / "tokentab.py"
+    if not src.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_tokentab_for_rates", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)   # module level is constants only, no side effects
+    return mod.CONFIG_DIR / "rates.json"
+
 
 def litellm_entry(name: str, table: dict) -> tuple[str, dict] | tuple[None, None]:
     """The LiteLLM record for one of our model names.
@@ -141,6 +162,7 @@ def self_check() -> int:
         # LiteLLM's placeholder for a price it does not know, and the same model
         # again at a re-seller's prices under a prefixed key.
         "zero-x": {"input_cost_per_token": 2e-06, "output_cost_per_token": 0},
+        "half-x": {"input_cost_per_token": 2e-06},   # a quote for one field of five
         "anthropic.claude-x": {"input_cost_per_token": 90e-06},
         "bedrock/claude-x-20250514": {"input_cost_per_token": 90e-06},
     }
@@ -189,6 +211,7 @@ def self_check() -> int:
     fixture = ('{\n  "updated": "2000-01-01",\n  "sources": {\n    "openai": "x"\n  },\n\n'
                '  "models": {\n'
                '    "gpt-x":   {"input": 9.0, "output": 8.0, "estimated": true},\n'
+               '    "half-x":  {"input": 9.0, "output": 9.0, "estimated": true},\n'
                '    "local-x": {"input": 9.0, "output": 9.0, "reference": true}\n'
                '  },\n\n  "aliases": {}\n}\n')
     with tempfile.TemporaryDirectory() as d:
@@ -207,7 +230,19 @@ def self_check() -> int:
         assert after["models"]["gpt-x"] == {"input": 1.0, "output": 8.0, "cache_read": 0.1}
         assert after["models"]["claude-x"]["input"] == 3.0        # the dated build, not 90.0
         assert after["models"]["zero-x"] == {"input": 2.0}        # the 0 was not copied
+        # LiteLLM priced one of half-x's two fields, so `output` is still a guess
+        # and the flag that says so has to stay.
+        assert after["models"]["half-x"] == {"input": 2.0, "output": 9.0, "estimated": True}
         assert after["updated"] != "2000-01-01" and "litellm" in after["sources"]
+
+        # A model named twice is added once, not twice — a duplicate key is valid
+        # JSON whose first copy nothing can ever see again.
+        dupes = Path(d) / "dupes.json"
+        dupes.write_text(fixture)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert main(["--rates", str(dupes), "--source", str(source),
+                         "--add", "claude-x", "claude-x", "--apply"]) == 0
+        assert dupes.read_text().count('"claude-x":') == 1
 
         # An --add whose anchor is missing rewrites nothing. It must say so.
         blind = Path(d) / "blind.json"
@@ -217,10 +252,25 @@ def self_check() -> int:
             try:
                 main(["--rates", str(blind), "--source", str(source), "--add", "claude-x", "--apply"])
             except SystemExit as e:
-                assert "did not take" in str(e), e
+                assert "did not take for claude-x" in str(e), e
             else:
                 raise AssertionError("an --add that rewrote nothing reported success")
         assert blind.read_text() == before, "left a half-written file behind"
+
+        # The date and the source line are textual anchors too, and a file that
+        # has neither must not be reported as though it got both.
+        for missing in ('{"models": {"gpt-x": {"input": 1.0}}, "sources": {}}',
+                        '{"models": {"gpt-x": {"input": 1.0}}, "updated": "2000-01-01"}'):
+            bare = Path(d) / "bare.json"
+            bare.write_text(missing)
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    main(["--rates", str(bare), "--source", str(source), "--apply"])
+                except SystemExit as e:
+                    assert "did not take" in str(e), e
+                else:
+                    raise AssertionError(f"reported success on {missing}")
+            assert bare.read_text() == missing
 
     print("  self-check: all rules hold")
     return 0
@@ -242,25 +292,40 @@ def main(argv: list[str] | None = None) -> int:
 
     src = Path(args.source)
     try:
-        if src.exists():
+        if src.is_file():
             table = json.loads(src.read_text())
         else:
             if "://" not in args.source:
-                raise SystemExit(f"no such file: {args.source} (and it is not a URL)")
+                what = "not a file" if src.exists() else "no such file"
+                raise SystemExit(f"{what}: {args.source} (and it is not a URL)")
             with urllib.request.urlopen(args.source, timeout=30) as r:
                 table = json.loads(r.read())
     except json.JSONDecodeError as e:
         raise SystemExit(f"{args.source} is not the JSON price table: {e}")
-    except urllib.error.URLError as e:
-        raise SystemExit(f"could not fetch {args.source}: {e}")
+    except OSError as e:   # a directory, a timeout, a dead host — all the same to us
+        raise SystemExit(f"could not read {args.source}: {e}")
+
     path = Path(args.rates).expanduser()
-    text = path.read_text()
-    own = json.loads(text)
+    try:
+        text = path.read_text()
+        own = json.loads(text)
+    except OSError as e:
+        raise SystemExit(f"could not read {path}: {e}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{path} is not valid JSON: {e}")
+    if not isinstance(own.get("models"), dict):
+        raise SystemExit(f'{path} has no "models" block — not a tokentab rates file')
 
     print(f"\n  tokentab rates · {len(table):,} models quoted upstream")
     print(f"  {args.source}\n")
 
-    requested = [m for m in args.add if m not in own["models"]]
+    priced_from = in_use()
+    if priced_from and priced_from.exists() and priced_from.resolve() != path.resolve():
+        print(f"  editing {path}")
+        print(f"  note: the installed tokentab prices from {priced_from} — "
+              f"re-run install.sh to carry a change across.\n")
+
+    requested = [m for m in dict.fromkeys(args.add) if m not in own["models"]]
     changes: list[tuple[str, dict]] = []
     unquoted, not_found, unstated = [], [], 0
     for name in list(own["models"]) + requested:
@@ -274,7 +339,12 @@ def main(argv: list[str] | None = None) -> int:
         quoted = quoted_rate(entry)
         unstated += len(FIELDS) - len(quoted)
         merged = {**current, **quoted}
-        estimated = merged.pop("estimated", None)
+        # `estimated` marks hand-typed stand-ins. It comes off only when the quote
+        # replaces every priced field it was covering: a partial quote leaves the
+        # rest a guess, and a guess has to keep saying so.
+        priced = {k for k in merged if k in FIELDS}
+        estimated = merged.pop("estimated") if (
+            "estimated" in merged and priced and priced <= quoted.keys()) else None
         if merged != current:
             changes.append((name, merged))
             for field, value in quoted.items():
@@ -332,6 +402,10 @@ def main(argv: list[str] | None = None) -> int:
     for name, rate in changes:
         if written["models"].get(name) != rate:
             raise SystemExit(f"rewrite did not take for {name} — {path} left unchanged")
+    if written.get("updated") != today:
+        raise SystemExit(f"the updated date did not take — {path} left unchanged")
+    if written.get("sources", {}).get("litellm") != SOURCE:
+        raise SystemExit(f"the sources.litellm line did not take — {path} left unchanged")
     tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate rates.json
     tmp.write_text(text)
     os.replace(tmp, path)
