@@ -179,6 +179,14 @@ def self_check() -> int:
         # again at a re-seller's prices under a prefixed key.
         "zero-x": {"input_cost_per_token": 2e-06, "output_cost_per_token": 0},
         "half-x": {"input_cost_per_token": 2e-06},   # a quote for one field of five
+        # Priced on both, but with nothing said about writing a cache entry.
+        "new-x": {"input_cost_per_token": 2e-06, "output_cost_per_token": 8e-06,
+                  "cache_read_input_token_cost": 1e-07},
+        # Quoted on all five — the only kind of quote that clears the flag.
+        "full-x": {"input_cost_per_token": 3e-06, "output_cost_per_token": 15e-06,
+                   "cache_creation_input_token_cost": 3.75e-06,
+                   "cache_creation_input_token_cost_above_1hr": 6e-06,
+                   "cache_read_input_token_cost": 3e-07},
         "anthropic.claude-x": {"input_cost_per_token": 90e-06},
         "bedrock/claude-x-20250514": {"input_cost_per_token": 90e-06},
     }
@@ -228,24 +236,41 @@ def self_check() -> int:
                '  "models": {\n'
                '    "gpt-x":   {"input": 9.0, "output": 8.0, "estimated": true},\n'
                '    "half-x":  {"input": 9.0, "output": 9.0, "estimated": true},\n'
+               '    "full-x":  {"input": 9.0, "output": 9.0, "estimated": true},\n'
                '    "local-x": {"input": 9.0, "output": 9.0, "reference": true}\n'
                '  },\n\n  "aliases": {}\n}\n')
     with tempfile.TemporaryDirectory() as d:
         rates, source = Path(d) / "rates.json", Path(d) / "table.json"
         source.write_text(json.dumps(table))
         rates.write_text(fixture)
-        argv = ["--rates", str(rates), "--source", str(source), "--add", "claude-x", "zero-x"]
+        argv = ["--rates", str(rates), "--source", str(source),
+                "--add", "claude-x", "new-x", "zero-x"]
         seen = io.StringIO()
         with contextlib.redirect_stdout(seen):
             assert main(argv) == 1, "a dry run that found drift exited 0"
             assert main(argv + ["--apply"]) == 0
             assert main(argv) == 0, "not idempotent — a second run still finds drift"
-        assert "estimated" in seen.getvalue(), "the dry run hid the estimated flag it drops"
+        assert "→ dropped" in seen.getvalue(), "the dry run hid the estimated flag it drops"
         after = json.loads(rates.read_text())
         assert after["models"]["local-x"] == {"input": 9.0, "output": 9.0, "reference": True}
-        assert after["models"]["gpt-x"] == {"input": 1.0, "output": 8.0, "cache_read": 0.1}
+        # gpt-x is quoted on three fields of five, so the flag it carried stays.
+        assert after["models"]["gpt-x"] == {"input": 1.0, "output": 8.0,
+                                            "cache_read": 0.1, "estimated": True}
         assert after["models"]["claude-x"]["input"] == 3.0        # the dated build, not 90.0
-        assert after["models"]["zero-x"] == {"input": 2.0}        # the 0 was not copied
+        # zero-x quotes an input and a placeholder 0 for output. tokentab prices
+        # every model on both, so it is reported rather than written half-priced.
+        assert "zero-x" not in after["models"]
+        assert "quotes no input and output" in seen.getvalue()
+        # new-x is priced on both but says nothing about cache writes, which will
+        # therefore value at nothing — so it is added carrying the flag that says
+        # some of these numbers are not quotes.
+        assert after["models"]["new-x"] == {"input": 2.0, "output": 8.0,
+                                            "cache_read": 0.1, "estimated": True}
+        # claude-x and full-x are quoted on all five, so neither needs the warning
+        # — and full-x, which carried it, has it taken off.
+        assert "estimated" not in after["models"]["claude-x"]
+        assert after["models"]["full-x"] == {"input": 3.0, "output": 15.0, "cache_write_5m": 3.75,
+                                             "cache_write_1h": 6.0, "cache_read": 0.3}
         # LiteLLM priced one of half-x's two fields, so `output` is still a guess
         # and the flag that says so has to stay.
         assert after["models"]["half-x"] == {"input": 2.0, "output": 9.0, "estimated": True}
@@ -295,10 +320,10 @@ def self_check() -> int:
         # charge to write a cache entry gets no cache-write fields at all, and
         # tokentab reads a rate object straight out of this file.
         tt = tokentab_module()
-        if tt:
-            row = {"model": "half-x", "provider": "openai", "input": 1, "output": 1,
-                   "cache_read": 1, "cache_write": 1, "cache_write_1h": 1}
-            assert tt.value_of(row, json.loads(rates.read_text())) > 0
+        assert tt, "tokentab.py sits next to this tool; if it will not load, say so"
+        row = {"model": "half-x", "provider": "openai", "input": 1, "output": 1,
+               "cache_read": 1, "cache_write": 1, "cache_write_1h": 1}
+        assert tt.value_of(row, json.loads(rates.read_text())) > 0
 
     print("  self-check: all rules hold")
     return 0
@@ -355,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
     requested = [m for m in dict.fromkeys(args.add) if m not in own["models"]]
     changes: list[tuple[str, dict]] = []
-    unquoted, not_found, unstated = [], [], 0
+    unquoted, not_found, unpriced, unstated = [], [], [], 0
     for name in list(own["models"]) + requested:
         current = own["models"].get(name, {})
         if current.get("reference"):
@@ -366,13 +391,23 @@ def main(argv: list[str] | None = None) -> int:
             continue
         quoted = quoted_rate(entry)
         unstated += len(FIELDS) - len(quoted)
+        if name in requested and not {"input", "output"} <= quoted.keys():
+            # Every model already in rates.json is priced on both, and tokentab
+            # reads both without asking. An upstream entry that quotes neither —
+            # an embedding model, or one carrying only placeholder zeros — is not
+            # a model this can start pricing, so it is reported, not written.
+            unpriced.append(name)
+            continue
         merged = {**current, **quoted}
-        # `estimated` marks hand-typed stand-ins. It comes off only when the quote
-        # replaces every priced field it was covering: a partial quote leaves the
-        # rest a guess, and a guess has to keep saying so.
-        priced = {k for k in merged if k in FIELDS}
-        estimated = merged.pop("estimated") if (
-            "estimated" in merged and priced and priced <= quoted.keys()) else None
+        # `estimated` says some of these numbers are not quotes. A field LiteLLM
+        # leaves unstated prices at zero, and nothing here can tell "the vendor
+        # does not charge" from "upstream has no number" — so a quote clears the
+        # flag only by covering all five, and a model added on a partial quote
+        # gets it, or its cache writes would value at nothing without a word.
+        full = quoted.keys() == FIELDS.keys()
+        estimated = merged.pop("estimated") if ("estimated" in merged and full) else None
+        if name in requested and not full:
+            merged["estimated"] = True
         if merged != current:
             changes.append((name, merged))
             for field, value in quoted.items():
@@ -392,6 +427,10 @@ def main(argv: list[str] | None = None) -> int:
     if not_found:
         print(f"\n  asked for, but LiteLLM does not list them — not added:")
         for name in not_found:
+            print(f"    {name}")
+    if unpriced:
+        print(f"\n  asked for, but LiteLLM quotes no input and output price — not added:")
+        for name in unpriced:
             print(f"    {name}")
     if unstated:
         print(f"\n  {unstated} fields left as they are — LiteLLM quotes no price for them "
@@ -418,10 +457,10 @@ def main(argv: list[str] | None = None) -> int:
     # Only what the file already has a place for. A rates.json with no `updated`
     # key or no `sources` block is owed neither line, and refusing to write over
     # a missing provenance note would throw the prices away with it.
-    naming = '"sources": {' in text and "litellm" not in own.get("sources", {})
-    if naming:
+    at = None if "litellm" in own.get("sources", {}) else re.search(r'"sources"\s*:\s*\{', text)
+    if at:
         comma = "," if own.get("sources") else ""  # an empty sources block takes none
-        text = text.replace('"sources": {', f'"sources": {{\n    "litellm": "{SOURCE}"{comma}', 1)
+        text = text[:at.end()] + f'\n    "litellm": "{SOURCE}"{comma}' + text[at.end():]
 
     # Never write a file tokentab cannot load — and never report a change the
     # rewrite did not actually make. Both edits above are textual: a missing
@@ -436,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"rewrite did not take for {name} — {path} left unchanged")
     if stamped and written.get("updated") != today:
         raise SystemExit(f"the updated date did not take — {path} left unchanged")
-    if naming and written.get("sources", {}).get("litellm") != SOURCE:
+    if at and written.get("sources", {}).get("litellm") != SOURCE:
         raise SystemExit(f"the sources.litellm line did not take — {path} left unchanged")
     try:
         tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate it
