@@ -209,6 +209,36 @@ plan fees over a whole cycle, and re-prices three models by hand against list ra
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
 `TOKENTAB_WEB`, `TOKENTAB_HOST`, `TOKENTAB_SERVER`, `TOKENTAB_BIND`, `TOKENTAB_PORT`.
 
+### Keeping rates honest
+
+Hand-typed prices go stale silently: a vendor cuts a price, nothing errors, and
+every Value since is quietly wrong. `tools/update-rates.py` checks `rates.json`
+against [LiteLLM's price table](https://github.com/BerriAI/litellm) and reports
+the drift.
+
+```sh
+python3 tools/update-rates.py              # dry run — what disagrees
+python3 tools/update-rates.py --apply      # write it
+python3 tools/update-rates.py --add gpt-5.7  # start pricing a new model
+```
+
+It is deliberately conservative, because the ways this could go wrong are all
+silent:
+
+- **A field LiteLLM omits is not a quote of zero.** OpenAI does not charge to
+  write a cache entry, so the field is simply absent; reading it as $0 would
+  rewrite nine models' cache pricing without a word.
+- **Only first-party keys count.** The same models appear under `anthropic.…`
+  and `bedrock/…` at Bedrock's prices. A model with no first-party quote is
+  reported and left hand-maintained, never approximated.
+- **Local models are never touched** — their rates are `reference` stand-ins,
+  not quotes, and no upstream has an opinion about them.
+- Everything else in the file — aliases, fallbacks, comments, layout — is left
+  byte-for-byte alone, so the diff is only the numbers that moved.
+
+`--self-check` runs the assertions behind those rules. The fetch lives here and
+not in `tokentab.py`, which makes no network calls at all.
+
 ## Architecture
 
 - **Collector + server:** `tokentab.py`, one file, Python 3.10+, **stdlib only**.
