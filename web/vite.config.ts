@@ -11,7 +11,7 @@ const dropDemoFixture = (mode: string): Plugin => ({
   name: 'drop-demo-fixture',
   apply: 'build',
   closeBundle() {
-    if (mode !== 'demo') fs.rmSync(path.resolve(__dirname, 'dist/demo.json'), { force: true })
+    if (mode !== 'demo') fs.rmSync(path.resolve(import.meta.dirname, 'dist/demo.json'), { force: true })
   },
 })
 
@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), dropDemoFixture(mode)],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   server: {
