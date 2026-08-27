@@ -16,13 +16,14 @@ Sources (all local, no vendor API needed):
   llama_swap    llama-swap log (llama.cpp timing lines) — local models, $0 cash
 
 Subcommands
-  scan     parse local transcripts, emit NDJSON events on stdout (incremental)
-  push     scan | ssh <server> tokentab ingest
-  ingest   read NDJSON on stdin into the SQLite store
-  serve    run the dashboard (bind tailnet address only)
-  report   CLI summary — same numbers as the dashboard
-  verify   acceptance checks: allocation conservation + rate spot-check
-  backfill scan everything on disk, ignoring saved offsets
+  scan       parse local transcripts, emit NDJSON events on stdout (incremental)
+  push       scan | ssh <server> tokentab ingest
+  ingest     read NDJSON on stdin into the SQLite store
+  serve      run the dashboard (bind tailnet address only)
+  report     CLI summary — same numbers as the dashboard (--json to script against)
+  statusline one line of current spend, for a shell prompt or an agent status bar
+  verify     acceptance checks: allocation conservation + rate spot-check
+  backfill   scan everything on disk, ignoring saved offsets
 
 Stdlib only. Python 3.10+.
 """
@@ -1042,6 +1043,10 @@ def cmd_report(args) -> int:
     period = resolve_period(args.preset, args.frm, args.to, plans)
     filters = {k: getattr(args, k, None) for k in FILTER_COLS}
     d = summarise(con, rates, plans, period, filters)
+    if args.json:
+        json.dump(d, sys.stdout, indent=2)
+        print()
+        return 0
     h = d["headline"]
     print(f"\n  tokentab · {d['period']['from']} → {d['period']['to']}  ({d['period']['preset']})")
     if d["filters"]:
@@ -1069,6 +1074,33 @@ def cmd_report(args) -> int:
         for n in d["notes"]:
             print(f"  ! {n}")
     print()
+    return 0
+
+
+def cmd_statusline(args) -> int:
+    """One line of current spend, for a shell prompt or an agent's status bar.
+
+    The line answers the question a flat-rate payer actually has — what the
+    cycle's usage would cost at list rates, against what the cycle really
+    costs. Anything that goes wrong is reported on stderr and prints nothing:
+    a status line that spills a traceback into someone's prompt is worse than
+    one that says nothing at all.
+    """
+    try:
+        con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+        rates, plans = load_rates(), load_plans()
+        period = resolve_period(args.preset, None, None, plans)
+        d = summarise(con, rates, plans, period, {k: None for k in FILTER_COLS})
+    except Exception as exc:  # never break the prompt
+        print(f"tokentab statusline: {exc}", file=sys.stderr)
+        return 0
+    h = d["headline"]
+    today = datetime.now(timezone.utc).date().isoformat()
+    parts = [f"${next((r['value'] for r in d['daily'] if r['day'] == today), 0.0):,.2f} today",
+             f"${h['value_usd']:,.2f} of ${h['cash_usd']:,.2f}"]
+    if h["cash_usd"] > 0:
+        parts.append(f"{h['value_usd'] / h['cash_usd']:.2f}×")
+    print(" · ".join(parts))
     return 0
 
 
@@ -1206,8 +1238,15 @@ def main(argv=None) -> int:
     s.add_argument("--to")
     for k in FILTER_COLS:
         s.add_argument(f"--{k}")
+    s.add_argument("--json", action="store_true", help="emit the summary as JSON instead of a table")
     s.add_argument("--db")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("statusline", help="one line of current spend, for a prompt or status bar")
+    s.add_argument("--preset", default="cycle",
+                   choices=["cycle", "prev_cycle", "7d", "30d", "mtd", "all"])
+    s.add_argument("--db")
+    s.set_defaults(func=cmd_statusline)
 
     s = sub.add_parser("verify", help="acceptance checks")
     s.add_argument("--db")

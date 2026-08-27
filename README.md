@@ -172,9 +172,23 @@ tokentab push --server <host>
 tokentab ingest               # NDJSON on stdin -> SQLite
 tokentab adopt [--apply]      # stamp accounts onto pre-account events (dry run by default)
 tokentab serve --bind <addr> --port 8899
-tokentab report --preset cycle [--project foo] [--provider anthropic] …
+tokentab report --preset cycle [--project foo] [--provider anthropic] … [--json]
+tokentab statusline           # one line of current spend, for a prompt or status bar
 tokentab verify               # acceptance checks
 ```
+
+`tokentab report --json` emits the same summary the dashboard renders — headline,
+plans, per-dimension breakdowns, daily series and notes — for scripting against.
+
+`tokentab statusline` prints one line: today's value, the period's value against
+its cash, and the ratio between them.
+
+```
+$68.86 today · $1,369.51 of $616.21 · 2.22×
+```
+
+It never fails loudly — anything that goes wrong goes to stderr and the line is
+simply not printed, so a broken store cannot wreck the prompt it is embedded in.
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
 plan fees over a whole cycle, and re-prices three models by hand against list rates.
