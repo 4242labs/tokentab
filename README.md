@@ -191,13 +191,18 @@ Always the current billing cycle — a cycle's cash is the whole fee no matter h
 much of it has elapsed, so the same line over any other window would compare a
 slice of usage against a full month. Ask about other windows with `report --json`.
 
-It never writes — no store created at a mistyped path, no schema change, no
-index built inside your prompt — waits at most 200 ms for one a write is
+It opens the store read-only, so it will not create one at a mistyped path,
+change a schema, build an index inside your prompt, or roll back the journal of
+an `ingest` you just killed. It waits about 200 ms for a store a write is
 holding, and prints nothing at all unless it can print the whole line: a
 missing, corrupt, or mid-write store leaves the prompt alone rather than
 painting an error over it on every render. A store older than your tokentab
 also goes blank, until the next command that writes migrates it. Set
 `TOKENTAB_DEBUG=1` to see why a line is blank.
+
+(The one thing a read-only open still writes is the `-shm` file of a store in
+WAL mode, which sqlite requires to read one at all. tokentab never turns WAL on;
+if you have, note that a WAL store in a read-only directory cannot be read.)
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
 plan fees over a whole cycle, and re-prices three models by hand against list rates.

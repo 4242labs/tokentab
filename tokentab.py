@@ -1067,7 +1067,10 @@ def cmd_serve(args) -> int:
 
     def get_con():
         # sqlite connections are not shareable across threads, and the server is
-        # threaded — one read-only connection per worker thread.
+        # threaded — one query_only connection per worker thread. That forbids
+        # statements, not journal recovery, which is why the migrating connect
+        # above runs first: by the time a worker opens, there is nothing to
+        # recover.
         if not getattr(local, "con", None):
             local.con = sqlite3.connect(db, check_same_thread=False)
             local.con.row_factory = sqlite3.Row
@@ -1128,7 +1131,7 @@ def cmd_report(args) -> int:
 def statusline_numbers(con, rates: dict, plans: dict) -> dict:
     """Today and the current cycle — the three numbers a status line needs.
 
-    `summarise` answers the same question, but to do it builds nine breakdown
+    `summarise` answers the same question, but to do it builds eight breakdown
     rollups and a daily series: a second of work on a large store, repeated on
     every prompt render. This asks for the three numbers instead, in one query
     plus the plan discovery.
