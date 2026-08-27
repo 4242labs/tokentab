@@ -95,11 +95,11 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_day     ON events(day);
 CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
-CREATE INDEX IF NOT EXISTS ix_events_plan    ON events(plan, account, ts);
 -- Covers the subscription discovery in plan_instances: with `day` in the index
--- its MIN/MAX need no row lookups at all. 576ms -> 53ms over 400k events, which
--- every report, dashboard and status line was paying. Building it costs 0.8s at
--- that size, once, on the first command run after an upgrade.
+-- its MIN/MAX need no row lookups at all. 551ms -> 60ms over 400k events, which
+-- every report, dashboard and status line was paying. It replaces (plan,
+-- account, ts) — nothing queries `ts` — so the store gets 12MB smaller too.
+DROP INDEX IF EXISTS ix_events_plan;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
@@ -504,18 +504,33 @@ def cmd_scan(args) -> int:
 # ---------------------------------------------------------------- store
 
 
-def connect(path: Path = DB_PATH, *, create: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
-    """The one way into the store — and the one place migrations are applied.
+def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
+    """The one way into the store — and the one place the schema is brought up to date.
 
-    `create=False` refuses to conjure a store that isn't there, for readers
-    where a mistyped path answering $0.00 forever would be worse than an error.
+    `write=False` opens a reader, and a reader changes nothing: no store is
+    created, no column is added, no index is built. That is not tidiness — a
+    status line renders inside someone's shell prompt, and a prompt is the
+    worst possible place to spend half a second building an index, take a write
+    lock two shells are racing for, or discover the store is on read-only media.
+    A reader that finds a schema older than this build says so and leaves it for
+    the next command that legitimately writes.
+
     `timeout` bounds the wait for a writer's lock, for readers that cannot
     afford to block.
     """
-    if not create and not path.exists():
-        raise FileNotFoundError(path)
-    if create:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    if not write:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        con = sqlite3.connect(path, timeout=timeout)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only = 1")
+        have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        stale = [col for col, _ in MIGRATIONS if col not in have]
+        if have and stale:
+            raise RuntimeError(f"store predates this build (no {', '.join(stale)}); "
+                               f"any command that writes will migrate it")
+        return con
+    path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=timeout)
     con.row_factory = sqlite3.Row
     # migrate before the schema script runs: its indexes reference newer columns
@@ -1107,7 +1122,7 @@ def statusline_numbers(con, rates: dict, plans: dict) -> dict:
 
     `summarise` answers the same question, but to do it builds nine breakdown
     rollups and a daily series: a second of work on a large store, repeated on
-    every prompt render. This asks for the four numbers instead, in one query
+    every prompt render. This asks for the three numbers instead, in one query
     plus the plan discovery.
 
     Cash is the *full* fee of every cycle the window overlaps — plans are not
@@ -1152,12 +1167,10 @@ def cmd_statusline(args) -> int:
     """
     try:
         path = Path(args.db).expanduser() if args.db else DB_PATH
-        # No creating a store (a mistyped path would answer $0.00 forever) and
-        # no long wait on one that `ingest` is mid-commit on. Otherwise the
-        # normal way in: opening read-only would skip MIGRATIONS, and a status
-        # line reading an older schema than every other command is how you get
-        # a prompt that is silently blank forever.
-        con = connect(path, create=False, timeout=0.2)
+        # A reader, and briefly: rendering a prompt must not create a store at a
+        # mistyped path, must not migrate or index one, and must not wait on one
+        # `ingest` is mid-commit on.
+        con = connect(path, write=False, timeout=0.2)
         n = statusline_numbers(con, load_rates(), load_plans())
     except Exception as exc:  # never break the prompt
         if os.environ.get("TOKENTAB_DEBUG"):

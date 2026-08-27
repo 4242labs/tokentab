@@ -191,10 +191,13 @@ Always the current billing cycle — a cycle's cash is the whole fee no matter h
 much of it has elapsed, so the same line over any other window would compare a
 slice of usage against a full month. Ask about other windows with `report --json`.
 
-It never creates a store, waits at most 200 ms for one a write is holding, and
-prints nothing at all unless it can print the whole line: a missing, corrupt, or
-mid-write store leaves the prompt alone rather than painting an error over it on
-every render. Set `TOKENTAB_DEBUG=1` to see why a line is blank.
+It never writes — no store created at a mistyped path, no schema change, no
+index built inside your prompt — waits at most 200 ms for one a write is
+holding, and prints nothing at all unless it can print the whole line: a
+missing, corrupt, or mid-write store leaves the prompt alone rather than
+painting an error over it on every render. A store older than your tokentab
+also goes blank, until the next command that writes migrates it. Set
+`TOKENTAB_DEBUG=1` to see why a line is blank.
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
 plan fees over a whole cycle, and re-prices three models by hand against list rates.
