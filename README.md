@@ -259,6 +259,11 @@ production build (`npm run build`) never includes it.
 * **Fees are what you tell it.** Nothing reads your invoices. A wrong
   `monthly_usd` or `cycle_day` scales every cash and allocated figure.
 
+## Contributors
+
+<!-- contributors:start -->
+<!-- contributors:end -->
+
 ## License
 
 Open source — [AGPL-3.0](LICENSE). Commercial — contact ahoy@42labs.io.
