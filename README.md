@@ -217,6 +217,53 @@ plan fees over a whole cycle, and re-prices three models by hand against list ra
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
 `TOKENTAB_WEB`, `TOKENTAB_HOST`, `TOKENTAB_SERVER`, `TOKENTAB_BIND`, `TOKENTAB_PORT`.
 
+### Keeping rates honest
+
+Hand-typed prices go stale silently: a vendor cuts a price, nothing errors, and
+every Value since is quietly wrong. `tools/update-rates.py` checks `rates.json`
+against [LiteLLM's price table](https://github.com/BerriAI/litellm) and reports
+the drift.
+
+```sh
+python3 tools/update-rates.py              # dry run — what disagrees
+python3 tools/update-rates.py --apply      # write it
+python3 tools/update-rates.py --add gpt-5.7  # start pricing a new model
+```
+
+It is deliberately conservative, because the ways this could go wrong are all
+silent:
+
+- **Only a stated price is a price.** A vendor that does not charge to write a
+  cache entry has no number to copy, so the field is simply absent — and
+  LiteLLM writes a literal `0` for a price it does not know. Copied into
+  rates.json, neither reads as free: both read as a Value of $0.00 that never
+  errors. A field is taken only when it carries a positive number.
+- **Only first-party keys count.** The same models appear under `anthropic.…`,
+  `bedrock/…` and `azure/…` at those platforms' prices. Matching is anchored on
+  the bare name, so a prefixed key can never win it; a model with no
+  first-party quote is reported and left hand-maintained, never approximated.
+- **Local models are never touched** — their rates are `reference` stand-ins,
+  not quotes, and no upstream has an opinion about them.
+- **A model it cannot price is not added.** tokentab values every model on an
+  input and an output rate, so `--add` refuses one upstream quotes neither for
+  (every embedding model) rather than writing it half-priced. A model added on
+  a partial quote is written `"estimated": true` — the fields nobody published
+  a number for value at zero, and `tokentab verify` says which models those
+  are, so a cache-heavy model cannot quietly value its writes at nothing.
+- **A change it did not make is never reported as made.** The edits are
+  textual, so the file is read back and compared against what was promised
+  before anything is written, and the write itself is atomic.
+
+Everything else in the file — aliases, fallbacks, comments — is left
+byte-for-byte alone. Besides the prices, `--apply` touches only the `updated`
+date and adds a `sources.litellm` line if the file lacks one; a rewritten price
+object does lose its hand-kept column alignment.
+
+`--self-check` runs the assertions behind those rules against a fixture,
+including one end-to-end `--apply` into a temporary file. A dry run exits 1 when
+it finds drift, so it can gate CI on its own. The fetch lives here and not in
+`tokentab.py`, which makes no network calls at all.
+
 ## Architecture
 
 - **Collector + server:** `tokentab.py`, one file, Python 3.10+, **stdlib only**.
