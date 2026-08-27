@@ -96,9 +96,10 @@ CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_day     ON events(day);
 CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
 -- Covers the subscription discovery in plan_instances: with `day` in the index
--- its MIN/MAX need no row lookups at all. 551ms -> 60ms over 400k events, which
+-- its MIN/MAX need no row lookups at all. 596ms -> 54ms over 400k events, which
 -- every report, dashboard and status line was paying. It replaces (plan,
--- account, ts) — nothing queries `ts` — so the store gets 12MB smaller too.
+-- account, ts) — nothing queries `ts` — freeing 9MB of index pages at that size.
+-- The pages go on the freelist, so the file stops growing rather than shrinking.
 DROP INDEX IF EXISTS ix_events_plan;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
@@ -507,13 +508,16 @@ def cmd_scan(args) -> int:
 def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
     """The one way into the store — and the one place the schema is brought up to date.
 
-    `write=False` opens a reader, and a reader changes nothing: no store is
-    created, no column is added, no index is built. That is not tidiness — a
-    status line renders inside someone's shell prompt, and a prompt is the
-    worst possible place to spend half a second building an index, take a write
-    lock two shells are racing for, or discover the store is on read-only media.
-    A reader that finds a schema older than this build says so and leaves it for
-    the next command that legitimately writes.
+    `write=False` opens a reader, and a reader changes nothing. That is not
+    tidiness — a status line renders inside someone's shell prompt, and a prompt
+    is the worst possible place to create a store at a mistyped path, spend half
+    a second building an index, take a write lock two shells are racing for, or
+    roll back the journal of an `ingest` that was killed a moment ago. `mode=ro`
+    is what forbids all of that; `query_only` would not, because journal
+    recovery happens on open, beneath it.
+
+    So a reader never migrates either. One that finds a schema older than this
+    build says so and leaves it for the next command that legitimately writes.
 
     `timeout` bounds the wait for a writer's lock, for readers that cannot
     afford to block.
@@ -521,12 +525,16 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
     if not write:
         if not path.exists():
             raise FileNotFoundError(path)
-        con = sqlite3.connect(path, timeout=timeout)
+        # as_uri, not an f-string: a `#` in the path would truncate the URI and
+        # silently drop mode=ro, which is how you end up creating a 0-byte file
+        # next to the store you meant to read.
+        con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
         con.row_factory = sqlite3.Row
-        con.execute("PRAGMA query_only = 1")
         have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        if not have:
+            raise RuntimeError("no events table — not a tokentab store")
         stale = [col for col, _ in MIGRATIONS if col not in have]
-        if have and stale:
+        if stale:
             raise RuntimeError(f"store predates this build (no {', '.join(stale)}); "
                                f"any command that writes will migrate it")
         return con
