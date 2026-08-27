@@ -180,15 +180,21 @@ tokentab verify               # acceptance checks
 `tokentab report --json` emits the same summary the dashboard renders — headline,
 plans, per-dimension breakdowns, daily series and notes — for scripting against.
 
-`tokentab statusline` prints one line: today's value, the period's value against
-its cash, and the ratio between them.
+`tokentab statusline` prints one line: today's value, the current cycle's value
+against its cash, and the ratio between them.
 
 ```
 $68.86 today · $1,369.51 of $616.21 · 2.22×
 ```
 
-It never fails loudly — anything that goes wrong goes to stderr and the line is
-simply not printed, so a broken store cannot wreck the prompt it is embedded in.
+Always the current billing cycle — a cycle's cash is the whole fee no matter how
+much of it has elapsed, so the same line over any other window would compare a
+slice of usage against a full month. Ask about other windows with `report --json`.
+
+It reads the store read-only and gives up after 200 ms, and prints nothing at all
+unless it can print the whole line: a missing, corrupt, or mid-write store leaves
+the prompt alone rather than painting an error over it on every render. Set
+`TOKENTAB_DEBUG=1` to see why a line is blank.
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
 plan fees over a whole cycle, and re-prices three models by hand against list rates.
