@@ -16,13 +16,14 @@ Sources (all local, no vendor API needed):
   llama_swap    llama-swap log (llama.cpp timing lines) — local models, $0 cash
 
 Subcommands
-  scan     parse local transcripts, emit NDJSON events on stdout (incremental)
-  push     scan | ssh <server> tokentab ingest
-  ingest   read NDJSON on stdin into the SQLite store
-  serve    run the dashboard (bind tailnet address only)
-  report   CLI summary — same numbers as the dashboard
-  verify   acceptance checks: allocation conservation + rate spot-check
-  backfill scan everything on disk, ignoring saved offsets
+  scan       parse local transcripts, emit NDJSON events on stdout (incremental)
+  push       scan | ssh <server> tokentab ingest
+  ingest     read NDJSON on stdin into the SQLite store
+  serve      run the dashboard (bind tailnet address only)
+  report     CLI summary — same numbers as the dashboard (--json to script against)
+  statusline one line of current spend, for a shell prompt or an agent status bar
+  verify     acceptance checks: allocation conservation + rate spot-check
+  backfill   scan everything on disk, ignoring saved offsets
 
 Stdlib only. Python 3.10+.
 """
@@ -1042,6 +1043,10 @@ def cmd_report(args) -> int:
     period = resolve_period(args.preset, args.frm, args.to, plans)
     filters = {k: getattr(args, k, None) for k in FILTER_COLS}
     d = summarise(con, rates, plans, period, filters)
+    if args.json:
+        json.dump(d, sys.stdout, indent=2)
+        print()
+        return 0
     h = d["headline"]
     print(f"\n  tokentab · {d['period']['from']} → {d['period']['to']}  ({d['period']['preset']})")
     if d["filters"]:
@@ -1069,6 +1074,80 @@ def cmd_report(args) -> int:
         for n in d["notes"]:
             print(f"  ! {n}")
     print()
+    return 0
+
+
+def statusline_numbers(con, rates: dict, plans: dict) -> dict:
+    """Today and the current cycle — the four numbers a status line needs.
+
+    `summarise` answers the same question, but to do it builds nine breakdown
+    rollups and a daily series: a second of work on a large store, repeated on
+    every prompt render. This asks for the four numbers instead, in one query
+    plus the plan discovery.
+
+    Cash is the *full* fee of every cycle the window overlaps — plans are not
+    pro-rated, and totalling them needs no allocation. The rule is the one in
+    `summarise`; keep the two in step (`tokentab verify` checks that they are).
+    """
+    period = resolve_period("cycle", None, None, plans)
+    frm, to = period["_from"], period["_to"]
+    today = datetime.now(timezone.utc).date().isoformat()
+    out = {"from": frm.isoformat(), "to": to.isoformat(), "today": 0.0, "value": 0.0, "cash": 0.0}
+    for r in con.execute(
+        "SELECT day, model, provider, SUM(input) input, SUM(output) output, "
+        "SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
+        "SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash "
+        "FROM events WHERE day >= ? AND day < ? GROUP BY day, model, provider",
+        (frm.isoformat(), to.isoformat()),
+    ):
+        v = value_of(r, rates)
+        out["value"] += v
+        out["cash"] += r["cash"] or 0.0
+        if r["day"] == today:
+            out["today"] += v
+    # plan_instances scans the whole table (no index on plan, account) and is
+    # about half the cost of this function — 200ms of 400ms at 640k events. An
+    # index would pay for report and serve too; add it there, not here.
+    for inst in plan_instances(con, plans):
+        active_from = date.fromisoformat(inst["active_from"])
+        active_to = date.fromisoformat(inst["active_to"]) if inst["active_to"] else None
+        for cs, ce in cycles_overlapping(frm, to, inst["cycle_day"]):
+            if ce <= active_from or (active_to and cs >= active_to):
+                continue
+            out["cash"] += inst["monthly_usd"]
+    return out
+
+
+def cmd_statusline(args) -> int:
+    """One line of current spend, for a shell prompt or an agent's status bar.
+
+    Always the current billing cycle. Other windows would put a number on the
+    line that cannot be read without its caveat — a cycle's cash is the whole
+    fee however little of the cycle the window covers, so `value of cash` over
+    any other span compares a slice against a full month. `report --json` is
+    the way to ask about those.
+
+    Nothing is printed unless the whole line can be printed. A status line is
+    embedded in someone's prompt, so a store that is missing, locked, or busy
+    is a reason to say nothing, not to paint an error over their terminal on
+    every render. Set TOKENTAB_DEBUG to see why the line is blank.
+    """
+    try:
+        path = Path(args.db).expanduser() if args.db else DB_PATH
+        # Read-only and fail-fast: rendering a prompt must never create a store
+        # (a mistyped path would answer $0.00 forever) and must never block on
+        # one that `ingest` is mid-commit on.
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
+        con.row_factory = sqlite3.Row
+        n = statusline_numbers(con, load_rates(), load_plans())
+    except Exception as exc:  # never break the prompt
+        if os.environ.get("TOKENTAB_DEBUG"):
+            print(f"tokentab statusline: {exc}", file=sys.stderr)
+        return 0
+    parts = [f"${n['today']:,.2f} today", f"${n['value']:,.2f} of ${n['cash']:,.2f}"]
+    if n["cash"] > 0:
+        parts.append(f"{n['value'] / n['cash']:.2f}×")
+    print(" · ".join(parts))
     return 0
 
 
@@ -1106,6 +1185,18 @@ def cmd_verify(args) -> int:
         print("  FAIL")
     else:
         print("  PASS")
+
+    # 1b. The status line totals cash and value its own cheap way, to stay fast
+    #     enough to run on every prompt. It must still say what report says.
+    print("\nstatusline agrees with report — same cycle, same numbers")
+    cyc = resolve_period("cycle", None, None, plans)
+    rep = summarise(con, rates, plans, cyc, {k: None for k in FILTER_COLS})["headline"]
+    sl = statusline_numbers(con, rates, plans)
+    for label, a, b in (("cash", sl["cash"], rep["cash_usd"]),
+                        ("value", sl["value"], rep["value_usd"])):
+        flag = "PASS" if abs(a - b) < 0.01 else "FAIL"
+        ok &= flag == "PASS"
+        print(f"  {label:<18} statusline ${a:>10,.2f}   report ${b:>10,.2f}   {flag}")
 
     # 2. Rate spot-check: a hand-computed price for a known model.
     print("\nrate spot-check — 1M input + 1M output at list price")
@@ -1206,8 +1297,13 @@ def main(argv=None) -> int:
     s.add_argument("--to")
     for k in FILTER_COLS:
         s.add_argument(f"--{k}")
+    s.add_argument("--json", action="store_true", help="emit the summary as JSON instead of a table")
     s.add_argument("--db")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("statusline", help="one line of this cycle's spend, for a prompt or status bar")
+    s.add_argument("--db")
+    s.set_defaults(func=cmd_statusline)
 
     s = sub.add_parser("verify", help="acceptance checks")
     s.add_argument("--db")
