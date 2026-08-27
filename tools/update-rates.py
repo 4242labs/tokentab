@@ -63,6 +63,27 @@ FIELDS = {
     "cache_read": ("cache_read_input_token_cost",),
 }
 
+def tokentab_module():
+    """tokentab.py as a module, or None if it cannot be had. Best effort, always.
+
+    This is a maintenance tool for a file tokentab reads; asking tokentab where
+    that file lives, and whether it can price what we wrote, beats re-deriving
+    either answer here and letting the two drift. But nothing it tells us is
+    worth taking the rates check down for, so every failure is just None.
+    """
+    src = HERE.parent / "tokentab.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("_tokentab_for_rates", src)
+        mod = importlib.util.module_from_spec(spec)
+        with contextlib.redirect_stdout(io.StringIO()):
+            spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
 def in_use() -> Path | None:
     """The rates.json the installed tokentab prices from, if it is a different file.
 
@@ -73,13 +94,8 @@ def in_use() -> Path | None:
     file it is editing and which one is being priced from. Asking tokentab
     rather than re-deriving the rule keeps the two from drifting apart.
     """
-    src = HERE.parent / "tokentab.py"
-    if not src.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("_tokentab_for_rates", src)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)   # module level is constants only, no side effects
-    return mod.CONFIG_DIR / "rates.json"
+    mod = tokentab_module()
+    return mod and getattr(mod, "CONFIG_DIR", None) and mod.CONFIG_DIR / "rates.json"
 
 
 def litellm_entry(name: str, table: dict) -> tuple[str, dict] | tuple[None, None]:
@@ -257,20 +273,32 @@ def self_check() -> int:
                 raise AssertionError("an --add that rewrote nothing reported success")
         assert blind.read_text() == before, "left a half-written file behind"
 
-        # The date and the source line are textual anchors too, and a file that
-        # has neither must not be reported as though it got both.
-        for missing in ('{"models": {"gpt-x": {"input": 1.0}}, "sources": {}}',
-                        '{"models": {"gpt-x": {"input": 1.0}}, "updated": "2000-01-01"}'):
-            bare = Path(d) / "bare.json"
-            bare.write_text(missing)
-            with contextlib.redirect_stdout(io.StringIO()):
-                try:
-                    main(["--rates", str(bare), "--source", str(source), "--apply"])
-                except SystemExit as e:
-                    assert "did not take" in str(e), e
-                else:
-                    raise AssertionError(f"reported success on {missing}")
-            assert bare.read_text() == missing
+        # The date and the source line are edits the file has to have a place
+        # for. Missing the place is not a failure — refusing to write the prices
+        # over an absent provenance note would be.
+        bare = Path(d) / "bare.json"
+        bare.write_text('{"models": {"gpt-x": {"input": 1.0}}}')
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert main(["--rates", str(bare), "--source", str(source), "--apply"]) == 0
+        got = json.loads(bare.read_text())
+        assert got["models"]["gpt-x"]["output"] == 8.0 and "updated" not in got
+
+        # An existing sources.litellm is left as the file states it, pin and all.
+        pinned = fixture.replace('"openai": "x"', '"litellm": "http://pinned/v1"')
+        pin = Path(d) / "pin.json"
+        pin.write_text(pinned)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert main(["--rates", str(pin), "--source", str(source), "--apply"]) == 0
+        assert json.loads(pin.read_text())["sources"] == {"litellm": "http://pinned/v1"}
+
+        # And what --add writes has to be priceable. A model whose vendor does not
+        # charge to write a cache entry gets no cache-write fields at all, and
+        # tokentab reads a rate object straight out of this file.
+        tt = tokentab_module()
+        if tt:
+            row = {"model": "half-x", "provider": "openai", "input": 1, "output": 1,
+                   "cache_read": 1, "cache_write": 1, "cache_write_1h": 1}
+            assert tt.value_of(row, json.loads(rates.read_text())) > 0
 
     print("  self-check: all rules hold")
     return 0
@@ -302,14 +330,14 @@ def main(argv: list[str] | None = None) -> int:
                 table = json.loads(r.read())
     except json.JSONDecodeError as e:
         raise SystemExit(f"{args.source} is not the JSON price table: {e}")
-    except OSError as e:   # a directory, a timeout, a dead host — all the same to us
-        raise SystemExit(f"could not read {args.source}: {e}")
+    except (OSError, UnicodeDecodeError) as e:   # a directory, a timeout, a dead
+        raise SystemExit(f"could not read {args.source}: {e}")   # host, binary junk
 
     path = Path(args.rates).expanduser()
     try:
         text = path.read_text()
         own = json.loads(text)
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise SystemExit(f"could not read {path}: {e}")
     except json.JSONDecodeError as e:
         raise SystemExit(f"{path} is not valid JSON: {e}")
@@ -386,8 +414,12 @@ def main(argv: list[str] | None = None) -> int:
             text = text.replace('\n  },\n\n  "aliases"',
                                 f',\n    "{name}": {{{body}}}\n  }},\n\n  "aliases"', 1)
     today = datetime.now(timezone.utc).date().isoformat()
-    text = re.sub(r'("updated":\s*)"[^"]*"', rf'\1"{today}"', text, count=1)
-    if "litellm" not in own.get("sources", {}):
+    text, stamped = re.subn(r'("updated":\s*)"[^"]*"', rf'\1"{today}"', text, count=1)
+    # Only what the file already has a place for. A rates.json with no `updated`
+    # key or no `sources` block is owed neither line, and refusing to write over
+    # a missing provenance note would throw the prices away with it.
+    naming = '"sources": {' in text and "litellm" not in own.get("sources", {})
+    if naming:
         comma = "," if own.get("sources") else ""  # an empty sources block takes none
         text = text.replace('"sources": {', f'"sources": {{\n    "litellm": "{SOURCE}"{comma}', 1)
 
@@ -402,13 +434,16 @@ def main(argv: list[str] | None = None) -> int:
     for name, rate in changes:
         if written["models"].get(name) != rate:
             raise SystemExit(f"rewrite did not take for {name} — {path} left unchanged")
-    if written.get("updated") != today:
+    if stamped and written.get("updated") != today:
         raise SystemExit(f"the updated date did not take — {path} left unchanged")
-    if written.get("sources", {}).get("litellm") != SOURCE:
+    if naming and written.get("sources", {}).get("litellm") != SOURCE:
         raise SystemExit(f"the sources.litellm line did not take — {path} left unchanged")
-    tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate rates.json
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    try:
+        tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate it
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        raise SystemExit(f"could not write {path}: {e}")
     print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.\n")
     return 0
 

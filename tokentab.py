@@ -645,9 +645,13 @@ def value_of(row, rates: dict) -> float:
     return (
         row["input"] * r["input"]
         + row["output"] * r["output"]
-        + row["cache_read"] * r["cache_read"]
-        + row["cache_write"] * r["cache_write_5m"]
-        + row["cache_write_1h"] * r["cache_write_1h"]
+        + row["cache_read"] * r.get("cache_read", 0.0)
+        # A rate states what a vendor charges, and OpenAI charges nothing to
+        # write a cache entry — so those fields are simply absent from its
+        # models. Absent is a zero charge, not missing data, and indexing it
+        # would crash every report the moment such a model is priced.
+        + row["cache_write"] * r.get("cache_write_5m", 0.0)
+        + row["cache_write_1h"] * r.get("cache_write_1h", 0.0)
     ) / 1_000_000
 
 
