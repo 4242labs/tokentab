@@ -1239,6 +1239,14 @@ def cmd_verify(args) -> int:
                if rate_for(r["model"], rates, r["provider"]) is rates["fallback"]]
     if missing:
         print(f"\n  ! no published rate for: {', '.join(missing)} — priced at the fallback rate")
+    # A rate carrying `estimated` has fields nobody published a number for. They
+    # value at zero, and on cache writes that is the quietest way this file can
+    # be wrong — so it gets said out loud rather than left in the json.
+    guessed = sorted({r["model"] for r in unknown if r["model"] not in missing
+                      and rate_for(r["model"], rates, r["provider"]).get("estimated")})
+    if guessed:
+        print(f"\n  ! part-guessed rate for: {', '.join(guessed)} — some fields have no "
+              f"published price behind them and value at zero")
     local = con.execute(
         "SELECT model, SUM(input+output) t FROM events WHERE provider='local' "
         "GROUP BY model ORDER BY t DESC").fetchall()

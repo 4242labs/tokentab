@@ -243,13 +243,15 @@ def self_check() -> int:
         rates, source = Path(d) / "rates.json", Path(d) / "table.json"
         source.write_text(json.dumps(table))
         rates.write_text(fixture)
-        argv = ["--rates", str(rates), "--source", str(source),
-                "--add", "claude-x", "new-x", "zero-x"]
+        base = ["--rates", str(rates), "--source", str(source)]
+        argv = base + ["--add", "claude-x", "new-x"]
         seen = io.StringIO()
         with contextlib.redirect_stdout(seen):
             assert main(argv) == 1, "a dry run that found drift exited 0"
             assert main(argv + ["--apply"]) == 0
             assert main(argv) == 0, "not idempotent — a second run still finds drift"
+            # An --add that could not happen is not "everything is current".
+            assert main(base + ["--add", "zero-x"]) == 1
         assert "→ dropped" in seen.getvalue(), "the dry run hid the estimated flag it drops"
         after = json.loads(rates.read_text())
         assert after["models"]["local-x"] == {"input": 9.0, "output": 9.0, "reference": True}
@@ -260,7 +262,7 @@ def self_check() -> int:
         # zero-x quotes an input and a placeholder 0 for output. tokentab prices
         # every model on both, so it is reported rather than written half-priced.
         assert "zero-x" not in after["models"]
-        assert "quotes no input and output" in seen.getvalue()
+        assert "no input and output pair" in seen.getvalue()
         # new-x is priced on both but says nothing about cache writes, which will
         # therefore value at nothing — so it is added carrying the flag that says
         # some of these numbers are not quotes.
@@ -390,20 +392,24 @@ def main(argv: list[str] | None = None) -> int:
             (not_found if name in requested else unquoted).append(name)
             continue
         quoted = quoted_rate(entry)
-        unstated += len(FIELDS) - len(quoted)
-        if name in requested and not {"input", "output"} <= quoted.keys():
-            # Every model already in rates.json is priced on both, and tokentab
-            # reads both without asking. An upstream entry that quotes neither —
-            # an embedding model, or one carrying only placeholder zeros — is not
-            # a model this can start pricing, so it is reported, not written.
+        merged = {**current, **quoted}
+        if not {"input", "output"} <= merged.keys():
+            # tokentab reads both without asking, so a model without both is not
+            # one this can price. Either the upstream entry has no pair to start
+            # from — an embedding model, or one carrying placeholder zeros — or
+            # the row already in the file is truncated. Both get reported and
+            # left alone rather than written half-priced.
             unpriced.append(name)
             continue
-        merged = {**current, **quoted}
-        # `estimated` says some of these numbers are not quotes. A field LiteLLM
-        # leaves unstated prices at zero, and nothing here can tell "the vendor
-        # does not charge" from "upstream has no number" — so a quote clears the
-        # flag only by covering all five, and a model added on a partial quote
-        # gets it, or its cache writes would value at nothing without a word.
+        unstated += len(FIELDS) - len(quoted)
+        # `estimated` says some of these numbers have no source behind them. A
+        # field LiteLLM leaves unstated prices at zero, and nothing here can tell
+        # "the vendor does not charge" from "upstream has no number" — so a model
+        # added on a partial quote is flagged, or its cache writes would value at
+        # nothing without a word. An existing row is not: its gaps were filled by
+        # hand from the vendor's own page, which rates.json cites as a source and
+        # LiteLLM does not supersede. Only a quote covering all five clears it,
+        # since only that leaves nothing unsourced.
         full = quoted.keys() == FIELDS.keys()
         estimated = merged.pop("estimated") if ("estimated" in merged and full) else None
         if name in requested and not full:
@@ -429,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         for name in not_found:
             print(f"    {name}")
     if unpriced:
-        print(f"\n  asked for, but LiteLLM quotes no input and output price — not added:")
+        print(f"\n  no input and output pair to price on — nothing added or rewritten:")
         for name in unpriced:
             print(f"    {name}")
     if unstated:
@@ -437,9 +443,10 @@ def main(argv: list[str] | None = None) -> int:
               f"(a vendor that does not charge for a cache write has no number to copy, "
               f"and a price upstream does not know is written as a 0, which is not one either).")
 
+    missed = bool(not_found or unpriced)   # an --add that did not happen is not "current"
     if not changes:
         print("\n  rates.json agrees with LiteLLM. Nothing to do.\n")
-        return 0
+        return 1 if missed else 0
 
     if not args.apply:
         print(f"\n  {len(changes)} model(s) would change. Dry run — re-run with --apply.\n")
@@ -484,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         raise SystemExit(f"could not write {path}: {e}")
     print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.\n")
-    return 0
+    return 1 if missed else 0
 
 
 if __name__ == "__main__":

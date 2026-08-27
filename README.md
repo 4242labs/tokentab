@@ -236,6 +236,12 @@ silent:
   first-party quote is reported and left hand-maintained, never approximated.
 - **Local models are never touched** — their rates are `reference` stand-ins,
   not quotes, and no upstream has an opinion about them.
+- **A model it cannot price is not added.** tokentab values every model on an
+  input and an output rate, so `--add` refuses one upstream quotes neither for
+  (every embedding model) rather than writing it half-priced. A model added on
+  a partial quote is written `"estimated": true` — the fields nobody published
+  a number for value at zero, and `tokentab verify` says which models those
+  are, so a cache-heavy model cannot quietly value its writes at nothing.
 - **A change it did not make is never reported as made.** The edits are
   textual, so the file is read back and compared against what was promised
   before anything is written, and the write itself is atomic.
