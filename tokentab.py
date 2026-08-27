@@ -95,7 +95,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_day     ON events(day);
 CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
-CREATE INDEX IF NOT EXISTS ix_events_plan    ON events(plan, account, ts);
+-- Covers the subscription discovery in plan_instances: with `day` in the index
+-- its MIN/MAX need no row lookups at all. 596ms -> 54ms over 400k events, which
+-- every report, dashboard and status line was paying. It replaces (plan,
+-- account, ts) — nothing queries `ts` — freeing 9MB of index pages at that size.
+-- The pages go on the freelist, so the file stops growing rather than shrinking.
+DROP INDEX IF EXISTS ix_events_plan;
+CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -499,9 +505,41 @@ def cmd_scan(args) -> int:
 # ---------------------------------------------------------------- store
 
 
-def connect(path: Path = DB_PATH) -> sqlite3.Connection:
+def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
+    """The one way into the store — and the one place the schema is brought up to date.
+
+    `write=False` opens a reader, and a reader changes nothing. That is not
+    tidiness — a status line renders inside someone's shell prompt, and a prompt
+    is the worst possible place to create a store at a mistyped path, spend half
+    a second building an index, take a write lock two shells are racing for, or
+    roll back the journal of an `ingest` that was killed a moment ago. `mode=ro`
+    is what forbids all of that; `query_only` would not, because journal
+    recovery happens on open, beneath it.
+
+    So a reader never migrates either. One that finds a schema older than this
+    build says so and leaves it for the next command that legitimately writes.
+
+    `timeout` bounds the wait for a writer's lock, for readers that cannot
+    afford to block.
+    """
+    if not write:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        # as_uri, not an f-string: a `#` in the path would truncate the URI and
+        # silently drop mode=ro, which is how you end up creating a 0-byte file
+        # next to the store you meant to read.
+        con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
+        con.row_factory = sqlite3.Row
+        have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        if not have:
+            raise RuntimeError("no events table — not a tokentab store")
+        stale = [col for col, _ in MIGRATIONS if col not in have]
+        if stale:
+            raise RuntimeError(f"store predates this build (no {', '.join(stale)}); "
+                               f"any command that writes will migrate it")
+        return con
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=timeout)
     con.row_factory = sqlite3.Row
     # migrate before the schema script runs: its indexes reference newer columns
     have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
@@ -766,6 +804,21 @@ def plan_instances(con, plans: dict) -> list[dict]:
     return sorted(out, key=lambda p: (p["plan"], p["account"]))
 
 
+def active_cycles(inst: dict, frm: date, to: date):
+    """The billing cycles of one subscription that overlap [frm, to).
+
+    A subscription bills for a whole cycle or not at all — it is never
+    pro-rated — so this is also the count of fees owed in the window. One
+    definition, because both the report and the status line total cash from it.
+    """
+    active_from = date.fromisoformat(inst["active_from"])
+    active_to = date.fromisoformat(inst["active_to"]) if inst["active_to"] else None
+    for cs, ce in cycles_overlapping(frm, to, inst["cycle_day"]):
+        if ce <= active_from or (active_to and cs >= active_to):
+            continue
+        yield cs, ce
+
+
 def where_from(filters: dict, extra_sql: str = "", params: list | None = None):
     sql, args = [], list(params or [])
     for key, col in FILTER_COLS.items():
@@ -829,13 +882,8 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         if filters.get("billing") and filters["billing"] != "flat":
             continue
         fee = inst["monthly_usd"]
-        cday = inst["cycle_day"]
-        active_from = date.fromisoformat(inst["active_from"])
-        active_to = date.fromisoformat(inst["active_to"]) if inst["active_to"] else None
         p_alloc = p_cash = 0.0
-        for cs, ce in cycles_overlapping(period["_from"], period["_to"], cday):
-            if ce <= active_from or (active_to and cs >= active_to):
-                continue
+        for cs, ce in active_cycles(inst, period["_from"], period["_to"]):
             p_cash += fee
             if cs < period["_from"] or ce > period["_to"]:
                 partial = True
@@ -1019,7 +1067,10 @@ def cmd_serve(args) -> int:
 
     def get_con():
         # sqlite connections are not shareable across threads, and the server is
-        # threaded — one read-only connection per worker thread.
+        # threaded — one query_only connection per worker thread. That forbids
+        # statements, not journal recovery, which is why the migrating connect
+        # above runs first: by the time a worker opens, there is nothing to
+        # recover.
         if not getattr(local, "con", None):
             local.con = sqlite3.connect(db, check_same_thread=False)
             local.con.row_factory = sqlite3.Row
@@ -1078,11 +1129,11 @@ def cmd_report(args) -> int:
 
 
 def statusline_numbers(con, rates: dict, plans: dict) -> dict:
-    """Today and the current cycle — the four numbers a status line needs.
+    """Today and the current cycle — the three numbers a status line needs.
 
-    `summarise` answers the same question, but to do it builds nine breakdown
+    `summarise` answers the same question, but to do it builds eight breakdown
     rollups and a daily series: a second of work on a large store, repeated on
-    every prompt render. This asks for the four numbers instead, in one query
+    every prompt render. This asks for the three numbers instead, in one query
     plus the plan discovery.
 
     Cash is the *full* fee of every cycle the window overlaps — plans are not
@@ -1092,7 +1143,7 @@ def statusline_numbers(con, rates: dict, plans: dict) -> dict:
     period = resolve_period("cycle", None, None, plans)
     frm, to = period["_from"], period["_to"]
     today = datetime.now(timezone.utc).date().isoformat()
-    out = {"from": frm.isoformat(), "to": to.isoformat(), "today": 0.0, "value": 0.0, "cash": 0.0}
+    out = {"today": 0.0, "value": 0.0, "cash": 0.0}
     for r in con.execute(
         "SELECT day, model, provider, SUM(input) input, SUM(output) output, "
         "SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
@@ -1105,15 +1156,8 @@ def statusline_numbers(con, rates: dict, plans: dict) -> dict:
         out["cash"] += r["cash"] or 0.0
         if r["day"] == today:
             out["today"] += v
-    # plan_instances scans the whole table (no index on plan, account) and is
-    # about half the cost of this function — 200ms of 400ms at 640k events. An
-    # index would pay for report and serve too; add it there, not here.
     for inst in plan_instances(con, plans):
-        active_from = date.fromisoformat(inst["active_from"])
-        active_to = date.fromisoformat(inst["active_to"]) if inst["active_to"] else None
-        for cs, ce in cycles_overlapping(frm, to, inst["cycle_day"]):
-            if ce <= active_from or (active_to and cs >= active_to):
-                continue
+        for _ in active_cycles(inst, frm, to):
             out["cash"] += inst["monthly_usd"]
     return out
 
@@ -1134,11 +1178,10 @@ def cmd_statusline(args) -> int:
     """
     try:
         path = Path(args.db).expanduser() if args.db else DB_PATH
-        # Read-only and fail-fast: rendering a prompt must never create a store
-        # (a mistyped path would answer $0.00 forever) and must never block on
-        # one that `ingest` is mid-commit on.
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
-        con.row_factory = sqlite3.Row
+        # A reader, and briefly: rendering a prompt must not create a store at a
+        # mistyped path, must not migrate or index one, and must not wait on one
+        # `ingest` is mid-commit on.
+        con = connect(path, write=False, timeout=0.2)
         n = statusline_numbers(con, load_rates(), load_plans())
     except Exception as exc:  # never break the prompt
         if os.environ.get("TOKENTAB_DEBUG"):
