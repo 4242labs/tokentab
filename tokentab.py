@@ -1028,9 +1028,14 @@ class Handler(BaseHTTPRequestHandler):
         build except index.html, which must never be cached or a deploy is
         invisible until a hard reload."""
         rel = path.lstrip("/") or "index.html"
-        target = (WEB_DIR / rel).resolve()
-        if not str(target).startswith(str(WEB_DIR.resolve())) or not target.is_file():
-            target = WEB_DIR / "index.html"  # client-side routing / unknown path
+        root = WEB_DIR.resolve()
+        target = (root / rel).resolve()
+        # is_relative_to, not startswith on the string: a prefix test also admits
+        # a sibling whose name merely begins with the bundle's — `.../web/dist`
+        # would let `.../web/dist-backup/secret` through. Comparing whole path
+        # components, a `..` can only ever resolve back inside, never out.
+        if not target.is_relative_to(root) or not target.is_file():
+            target = root / "index.html"  # client-side routing / unknown path
         if not target.is_file():
             return self._send(200, NO_BUILD_HTML % str(WEB_DIR).encode(),
                               "text/html; charset=utf-8")
