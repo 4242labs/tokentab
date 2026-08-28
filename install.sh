@@ -105,13 +105,21 @@ fi
 # Absent upstream is not "keep what is there" — a repo with no log is a repo
 # where no price has moved, and a stale copy would price past days at rates
 # nothing here still publishes. It is removed.
+#
+# Both are copied through a temp file and renamed into place: `cp` truncates the
+# destination before it writes, so a re-run interrupted mid-copy leaves half a
+# JSON file, and half a JSON file is one tokentab refuses to load — every
+# command, not just the one that reads prices. A rename either happened or did
+# not.
 if [ -f "$SRC/price_history.json" ]; then
-  cp "$SRC/price_history.json" "$CFG/price_history.json"
+  cp "$SRC/price_history.json" "$CFG/price_history.json.tmp"
+  mv "$CFG/price_history.json.tmp" "$CFG/price_history.json"
   say "history   $CFG/price_history.json"
 else
   rm -f "$CFG/price_history.json"
 fi
-cp "$SRC/rates.json" "$CFG/rates.json"
+cp "$SRC/rates.json" "$CFG/rates.json.tmp"
+mv "$CFG/rates.json.tmp" "$CFG/rates.json"
 say "rates     $CFG/rates.json"
 
 # plans.json names the real accounts. It is gitignored, it is the one file here

@@ -685,21 +685,28 @@ def price_rows(con, rates: dict, *, apply: bool = True, chunk: int = 20_000) -> 
     """
     # `rate_for` reaches the log only after the name resolves inside `models`, so
     # a model that has left rates.json is priced for every day by the fallback —
-    # or by whatever shorter name it now collapses onto. A reprice would
-    # overwrite correctly dated Values with that, and report only how many rows
-    # it rewrote. `verify` catches it too, but only after the writing is done.
-    # Refuse instead: the log is still there, and naming the model in rates.json
-    # again is the whole fix.
-    alias = rates.get("aliases", {})
-    present = {alias.get(r["model"], r["model"])
-               for r in con.execute("SELECT DISTINCT model FROM events")}
-    lost = sorted(m for m in rates.get("_history", ()) if m in present and m not in rates["models"])
-    if lost:
-        raise SystemExit(f"tokentab: {', '.join(lost)} has past prices logged but no current one "
-                         f"— rates.json no longer names it, so repricing would value every day "
-                         f"of it at the fallback rate and throw the logged prices away. Put the "
-                         f"model back in rates.json (or delete its price_history.json records "
-                         f"if the events are gone). Nothing was written.")
+    # or, worse, by whatever shorter name it now collapses onto, which is another
+    # model's price table. A reprice would overwrite correctly dated Values with
+    # that and report only how many rows it rewrote. `verify` catches it too, but
+    # only after the writing is done. Refuse instead: the log is still there, and
+    # naming the model in rates.json again is the whole fix.
+    #
+    # Asked by putting the departed names back and seeing what the store's own
+    # model ids resolve to then — the same question `rate_for` asks, which is the
+    # only way to ask it about `claude-opus-4-5-20251101` when the log is filed
+    # under `claude-opus-4-5`.
+    dead = set(rates.get("_history", ())) - set(rates["models"])
+    if dead:
+        restored = {*rates["models"], *dead}
+        lost = sorted({m for r in con.execute("SELECT DISTINCT model FROM events")
+                       if (m := resolve_model(r["model"], rates, restored)) in dead})
+        if lost:
+            raise SystemExit(f"tokentab: {', '.join(lost)} has past prices logged but no current "
+                             f"one — rates.json no longer names it, so repricing would value "
+                             f"every day of it at another model's rate, or at the fallback, and "
+                             f"throw the logged prices away. Put the model back in rates.json "
+                             f"(or delete its price_history.json records if the events are "
+                             f"gone). Nothing was written.")
 
     # rowid, not id: `NULL > ''` is NULL and `'' > ''` is false, so a row that
     # reached the store without an id would be stepped straight over — and this
@@ -885,6 +892,29 @@ def cmd_adopt(args) -> int:
 # ---------------------------------------------------------------- pricing
 
 
+def resolve_model(model: str, rates: dict, models=None) -> str | None:
+    """The rates.json name that prices `model` — None when none of them does.
+
+    A collector stores the vendor's own id, dated build and all
+    (`claude-opus-4-5-20251101`), and rates.json is keyed by the family
+    (`claude-opus-4-5`). Everything that has an opinion about a model has to
+    walk the same alias-then-longest-prefix path to the same name, because the
+    price history is filed under the name this returns: anything re-deriving it
+    a shorter way looks the log up under a key that is never there, and finds
+    nothing wrong. `models` overrides the table, to ask what would resolve if a
+    name that has left rates.json were put back.
+    """
+    models = rates["models"] if models is None else models
+    m = rates.get("aliases", {}).get(model, model)
+    if m in models:
+        return m
+    best = None
+    for k in models:
+        if m.startswith(k) and (best is None or len(k) > len(best)):
+            best = k
+    return best
+
+
 def rate_for(model: str, rates: dict, provider: str | None = None,
              day: str | None = None) -> dict:
     """The rate that priced `model` on `day` — today's rate when no day is given.
@@ -895,20 +925,13 @@ def rate_for(model: str, rates: dict, provider: str | None = None,
     re-priced every time a vendor changes a rate.
     """
     models = rates["models"]
-    aliases = rates.get("aliases", {})
-    m = aliases.get(model, model)
-    if m in rates.get("free_models", []):
+    if rates.get("aliases", {}).get(model, model) in rates.get("free_models", []):
         return {k: 0.0 for k in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")}
-    if m not in models:
-        best = None
-        for k in models:
-            if m.startswith(k) and (best is None or len(k) > len(best)):
-                best = k
-        # The identity of these two objects is what `verify` reads to say "no
-        # published rate for" — return them, never a copy.
-        if not best:
-            return rates["local_fallback"] if provider == "local" else rates["fallback"]
-        m = best
+    m = resolve_model(model, rates)
+    # The identity of these two objects is what `verify` reads to say "no
+    # published rate for" — return them, never a copy.
+    if m is None:
+        return rates["local_fallback"] if provider == "local" else rates["fallback"]
     if day is not None:
         # `until` is exclusive and the records are sorted, so the first one the
         # day still falls inside is the price that was in force.
@@ -1555,7 +1578,8 @@ def cmd_verify(args) -> int:
                   f"${sum(v or 0 for v in book):,.2f}, not the ${sum(pin):,.2f} written here "
                   f"when this check was. Expected after a price change dated on or before "
                   f"that day; if none was made, rates.json was edited without logging what "
-                  f"it replaced.")
+                  f"it replaced. Until the pin is updated to the new number, this line "
+                  f"only checks that the arithmetic multiplies — not that the price is right.")
 
     # 2a. The stored Values are the ledger; rates.json and the log are the book
     #     they were written from. They agree until someone corrects a rate, and
@@ -1563,15 +1587,27 @@ def cmd_verify(args) -> int:
     print("\nstored Values agree with the rates they were priced from")
     # Rows carrying no Value are not counted here — nothing gets this far with
     # one; the check at the top of this command has already said so and stopped.
-    stale = price_rows(con, rates, apply=False)
-    total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
-    print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value today's rates give them")
-    if stale:
-        print(f"  ! {stale:,} row(s) would price differently now — a rate changed after they "
-              f"were written. Deliberate: run `tokentab reprice --apply`. Not "
-              f"deliberate: the rate that moved is the one to look at.")
-    ok &= not stale
-    print(f"  {'FAIL' if stale else 'PASS'}")
+    # `price_rows` refuses outright when a model with logged prices has left
+    # rates.json — right for a command that writes, wrong for the one command
+    # whose whole job is to say what is broken. Caught: the refusal becomes this
+    # check's failure, and the checks below it, including the one that names the
+    # departed model, still run.
+    try:
+        stale = price_rows(con, rates, apply=False)
+    except SystemExit as e:
+        print(f"  ! {str(e).removeprefix('tokentab: ')}")
+        print("  FAIL")
+        ok = False
+    else:
+        total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
+        print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value "
+              f"today's rates give them")
+        if stale:
+            print(f"  ! {stale:,} row(s) would price differently now — a rate changed "
+                  f"after they were written. Deliberate: run `tokentab reprice "
+                  f"--apply`. Not deliberate: the rate that moved is the one to look at.")
+        ok &= not stale
+        print(f"  {'FAIL' if stale else 'PASS'}")
 
     # 2b. Dated prices: every day must resolve to exactly one rate. Falling
     #     through to the current price makes that true for any day later than the
@@ -1583,6 +1619,13 @@ def cmd_verify(args) -> int:
     print("\ndated prices — every past rate is reachable, uniquely dated, and priceable")
     today = datetime.now(timezone.utc).date().isoformat()
     first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
+    # The store's model ids are the vendor's, dated build and all; the log is
+    # keyed by the rates.json family name. Asking the store about the log's key
+    # directly matches nothing and reads as "no such usage" — which is the
+    # answer that turns a wrong number back into a note.
+    priced_by: dict[str, list] = {}
+    for r in con.execute("SELECT DISTINCT model FROM events"):
+        priced_by.setdefault(resolve_model(r["model"], rates), []).append(r["model"])
     bad, thin, records, live = [], [], 0, 0
     for model, recs in sorted(past.items()):
         records += len(recs)
@@ -1617,10 +1660,13 @@ def cmd_verify(args) -> int:
                 # wrong number.
                 missing = sorted(charged - r.keys())
                 cols = [RATE_COLS[f] for f in missing]
-                used = con.execute(
-                    f"SELECT {' + '.join(f'SUM({c})' for c in cols)} n FROM events "
-                    f"WHERE model = ? AND day >= ? AND day < ?",
-                    (model, start, r["until"])).fetchone()["n"] or 0
+                ids = priced_by.get(model, [])
+                used = 0
+                if ids:
+                    used = con.execute(
+                        f"SELECT {' + '.join(f'SUM({c})' for c in cols)} n FROM events "
+                        f"WHERE model IN ({','.join('?' * len(ids))}) AND day >= ? AND day < ?",
+                        (*ids, start, r["until"])).fetchone()["n"] or 0
                 said = (f"{model}: the price ending {r['until']} says nothing about "
                         f"{', '.join(missing)}")
                 if used:

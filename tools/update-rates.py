@@ -463,6 +463,12 @@ def iso_date(v: str) -> bool:
         return False
 
 
+# What a logged record may carry: the price fields, and the two provenance flags
+# `load_rates` allows beside them. Anything else in a rates.json entry is a hand
+# annotation, and copying it into the log makes the log unreadable.
+LOGGABLE = {*FIELDS, "estimated", "reference"}
+
+
 def log_past(path: Path, outgoing: list, until: str) -> int:
     """Record what these models cost until `until`, so past days keep pricing at it.
 
@@ -509,7 +515,12 @@ def log_past(path: Path, outgoing: list, until: str) -> int:
                              f"which is after {until}. The outgoing price is always the "
                              f"newest one — logging an earlier date would re-date every "
                              f"period after it. rates.json left unchanged.")
-        recs.append({"until": until, **was})
+        # Filtered, not copied whole: `load_rates` refuses a record carrying a
+        # field it does not know, and refusing happens on every read — so one
+        # stray key in rates.json (a note somebody added by hand) would be
+        # logged here and then stop `report`, `verify` and `reprice` alike.
+        recs.append({"until": until,
+                     **{k: v for k, v in was.items() if k in LOGGABLE}})
         recs.sort(key=lambda r: r["until"])
         written += 1
     if not written:

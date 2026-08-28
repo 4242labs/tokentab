@@ -181,6 +181,11 @@ def main() -> int:
     ap.add_argument("-o", "--out", default=str(HERE.parent / "web/public/demo.json"))
     args = ap.parse_args()
 
+    # The demo bundle is committed, so it has to price from the repo's own
+    # rates — not from whatever the person running this has installed. On a
+    # developer's machine `_config_dir` finds ~/.config/tokentab and the numbers
+    # come out of a table nobody reviewing the diff can see.
+    tokentab.CONFIG_DIR = HERE.parent
     # load_rates, not a read of rates.json: it also loads price_history.json,
     # which is what prices a past day at the rate that applied then. Reading
     # the table alone would price 80 days of demo at today's rate and let a
