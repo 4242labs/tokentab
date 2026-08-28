@@ -162,6 +162,14 @@ export default function App() {
             </Alert>
           )}
 
+          {/* Outside the summary branch on purpose: when /api/summary fails, the
+              panel saying which machine went quiet is the one worth keeping. */}
+          {fleet.length > 0 && (
+            <Panel title="Machines">
+              <MachinesCard rows={fleet} />
+            </Panel>
+          )}
+
           {/* Skeletons say "on its way". A failed fetch is not on its way, and four
               cards shimmering forever under the sentence explaining why there are
               no numbers reads as one still loading. */}
@@ -184,12 +192,6 @@ export default function App() {
                     </Alert>
                   ))}
                 </div>
-              )}
-
-              {fleet.length > 0 && (
-                <Panel title="Machines">
-                  <MachinesCard rows={fleet} />
-                </Panel>
               )}
 
               <Panel title="Daily value">

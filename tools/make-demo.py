@@ -238,7 +238,7 @@ def main() -> int:
             con.execute("INSERT INTO hosts(host,last_seen) VALUES(?,?) "
                         "ON CONFLICT(host) DO UPDATE SET last_seen=excluded.last_seen",
                         (host, (now - timedelta(minutes=minutes)).isoformat(timespec="seconds")))
-        machines = tokentab.machines(con)
+        fleet = tokentab.machines(con)
         con.close()
 
     payload = {
@@ -248,7 +248,7 @@ def main() -> int:
         "presets": PRESETS,
         "filters": options,
         "summaries": summaries,
-        "machines": machines,
+        "machines": fleet,
     }
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

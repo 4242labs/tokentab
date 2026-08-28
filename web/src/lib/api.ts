@@ -111,7 +111,8 @@ interface DemoFixture {
   generated: string
   filters: Record<string, string[]>
   summaries: Record<string, Summary>
-  machines: Machine[]
+  /** Optional: a demo.json built before the machines panel existed has none. */
+  machines?: Machine[]
 }
 
 let fixture: Promise<DemoFixture> | null = null
@@ -149,7 +150,7 @@ async function demoSummary(filters: Filters): Promise<Summary> {
 }
 
 export const fetchMachines = () =>
-  DEMO ? loadFixture().then((f) => f.machines) : get<Machine[]>('api/machines')
+  DEMO ? loadFixture().then((f) => f.machines ?? []) : get<Machine[]>('api/machines')
 
 export const fetchFilters = () =>
   DEMO ? loadFixture().then((f) => f.filters) : get<Record<string, string[]>>('api/filters')

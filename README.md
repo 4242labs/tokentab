@@ -166,7 +166,8 @@ directory — `./tokentab.py report` works with nothing set up.
 ## Commands
 
 ```sh
-tokentab scan                 # NDJSON of new events since the last run (byte-offset incremental)
+tokentab scan                 # NDJSON of new events since the last run (byte-offset incremental),
+                              # plus one heartbeat line so the store knows the machine reported
 tokentab backfill             # scan everything on disk, ignoring saved offsets
 tokentab push --server <host>
 tokentab ingest               # NDJSON on stdin -> SQLite
