@@ -72,7 +72,13 @@ export default function App() {
           setError(null)
         }
       })
-      .catch((e: Error) => !stale && setError(e.message))
+      .catch((e: Error) => {
+        if (stale) return
+        setError(e.message)
+        // Not clearing this leaves the previous period's money on screen under
+        // an error about the one that failed, with nothing saying it is stale.
+        setData(null)
+      })
     return () => {
       stale = true
     }

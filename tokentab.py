@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS events (
   cash_usd       REAL NOT NULL DEFAULT 0,  -- metered only; flat/local are always 0
   -- What this usage was worth at the list price of the day it happened, written
   -- once when the event lands. A price a vendor changes later cannot reach it.
-  -- NULL means not yet priced; `connect` fills those in, `reprice` redoes them.
+  -- NULL means not yet priced; only `reprice --apply` fills those in.
   value_usd      REAL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
@@ -105,6 +105,9 @@ CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
 -- account, ts) — nothing queries `ts` — freeing 9MB of index pages at that size.
 -- The pages go on the freelist, so the file stops growing rather than shrinking.
 DROP INDEX IF EXISTS ix_events_plan;
+-- Built by a build that probed for unpriced rows on every read. Nothing
+-- asks that question any more, so it is dead weight on stores that have it.
+DROP INDEX IF EXISTS ix_events_unpriced;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
@@ -116,6 +119,19 @@ MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL D
 
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_day(v) -> bool:
+    """A real YYYY-MM-DD date. The shape alone is not enough: 2026-99-99 has it,
+    and every comparison here is a string comparison, so it would sort between
+    December and nothing and quietly move a price boundary."""
+    if not DAY_RE.fullmatch(str(v)):
+        return False
+    try:
+        date.fromisoformat(str(v))
+    except ValueError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- config
@@ -149,7 +165,7 @@ def load_rates() -> dict:
         if not isinstance(recs, list):
             raise SystemExit(f"tokentab: price_history.json — {model} is not a list of prices")
         for r in recs:
-            if not isinstance(r, dict) or not DAY_RE.fullmatch(str(r.get("until", ""))):
+            if not isinstance(r, dict) or not is_day(r.get("until", "")):
                 raise SystemExit(f"tokentab: price_history.json — {model} has a price with no "
                                  f"YYYY-MM-DD `until` date")
             if not all(isinstance(r.get(f), (int, float)) for f in ("input", "output")):
@@ -653,6 +669,12 @@ def cmd_ingest(args) -> int:
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        # No id, no way back to the row. `id > ?` walks the table in id order and
+        # a NULL or empty one is unreachable by it, so `reprice` would report
+        # nothing to do while every report refuses to add the store up — and
+        # NULL never conflicts, so each run would insert the row again.
+        if not ev.get("id"):
             continue
         ev["day"] = ev["ts"][:10]
         ev["account"] = ev.get("account") or ""  # events from a pre-account collector
@@ -1363,8 +1385,16 @@ def cmd_verify(args) -> int:
     # hit as a stack trace out of the first check.
     unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
     if unpriced:
+        # A row with no id is not one `reprice` can reach — it walks the table in
+        # id order — so saying "run reprice" about one would be advice that does
+        # nothing. Written by an older build from a collector that sent no id.
+        lost = con.execute("SELECT COUNT(*) n FROM events "
+                           "WHERE COALESCE(id, '') = ''").fetchone()["n"]
         print(f"! {unpriced:,} row(s) carry no Value — the store was migrated but never "
               f"priced, and no report will add up until `tokentab reprice --apply` has run.")
+        if lost:
+            print(f"  ! {lost:,} of them carry no id either, and `reprice` cannot reach those. "
+                  f"Delete them: DELETE FROM events WHERE COALESCE(id, '') = ''")
         return 1
 
     # 1. Conservation: over a whole billing cycle, per-project allocations must

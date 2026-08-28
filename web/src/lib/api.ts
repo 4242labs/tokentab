@@ -76,7 +76,13 @@ export const PRESETS: [string, string][] = [
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path)
-  if (!res.ok) throw new Error(`${path} -> ${res.status} ${res.statusText}`)
+  if (!res.ok) {
+    // The server answers an error as JSON `{error}`, and that sentence names
+    // the command that fixes it — a store that was migrated but never priced
+    // says so. Throwing the status code instead threw the answer away.
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `${path} -> ${res.status} ${res.statusText}`)
+  }
   return (await res.json()) as T
 }
 

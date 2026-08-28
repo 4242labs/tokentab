@@ -263,3 +263,29 @@ EOF
 fi
 
 printf '\ntokentab %s installed.\n' "$VERSION"
+
+# An upgrade is "re-run this script", and a store written before events carried
+# their own Value has none on its old rows. Every report, the dashboard and the
+# status line refuse to add up a period holding one — correctly, rather than
+# answering $0.00 — so the upgrade has one manual step, and this is the only
+# place that would otherwise not mention it.
+if [ -f "$LIB/tokentab.db" ] && python3 -c '
+import sqlite3, sys
+con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+try:
+    unpriced = con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone()
+except sqlite3.OperationalError:
+    unpriced = True  # older than the column: every row in it needs pricing
+sys.exit(0 if unpriced else 1)
+' "$LIB/tokentab.db"; then
+  cat <<EOF
+
+  ACTION NEEDED: events already in the store carry no Value yet, and no report
+  will add up until they do. One command, once:
+
+    tokentab reprice --apply
+
+  It prices each event at the rate of its own day. A minute or so per million.
+
+EOF
+fi

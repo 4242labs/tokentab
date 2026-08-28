@@ -1,5 +1,5 @@
 {
-  "_comment": "Prices that are no longer in force. rates.json holds what a model costs today; this holds what it cost before, so a report of last month keeps last month's numbers when a vendor moves a price. Kept in its own file because rates.json is a hand-aligned table that tools/update-rates.py rewrites as text — this one is append-only and machine-written.",
+  "_comment": "Prices that are no longer in force. rates.json holds what a model costs today; this holds what it cost before. An event already stored keeps its own Value and is not re-priced by either file — this one is read when a Value is written: at ingest, and by `tokentab reprice`. Kept in its own file because rates.json is a hand-aligned table that tools/update-rates.py rewrites as text — this one is append-only and machine-written.",
   "_format": "history[model] is a list of {until, input, output, ...} in the same USD-per-million units as rates.json. `until` is exclusive: the record prices every day before it. A day later than every record for a model prices at rates.json. Empty is normal and means no price has moved yet.",
 
   "history": {}

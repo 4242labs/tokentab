@@ -436,6 +436,15 @@ def self_check() -> int:
     return 0
 
 
+def iso_date(v: str) -> bool:
+    """A real calendar date. 2026-99-99 has the shape and is not one, and every
+    comparison against it is a string comparison that would sort past December."""
+    try:
+        return bool(date.fromisoformat(v))
+    except ValueError:
+        return False
+
+
 def log_past(path: Path, outgoing: list, until: str) -> int:
     """Record what these models cost until `until`, so past days keep pricing at it.
 
@@ -639,8 +648,14 @@ def main(argv: list[str] | None = None) -> int:
     moved = [(n, own["models"][n]) for n, rate in changes if n in own["models"]
              and any(abs(own["models"][n].get(f, -1) - rate.get(f, -1)) > 1e-9 for f in FIELDS)]
     effective = args.as_of or today
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", effective):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", effective) or not iso_date(effective):
         raise SystemExit(f"--as-of wants a YYYY-MM-DD date, not {effective!r}")
+    # A price cannot stop applying tomorrow: `until` is the day the new rate
+    # takes over, so a future one prices days that have not happened at a rate
+    # nobody has charged, and `tokentab verify` fails on it afterwards.
+    if effective > today:
+        raise SystemExit(f"--as-of {effective} is in the future — a price can only have "
+                         f"stopped applying on a day that has happened.")
     logged = log_past(path.with_name("price_history.json"), moved, effective)
 
     try:

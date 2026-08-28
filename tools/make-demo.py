@@ -193,6 +193,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         con = tokentab.connect(Path(tmp) / "demo.db")
         build_store(con, today)
+        # The rows land with no Value, the way they do from any collector that
+        # predates the column, and a report of a window holding one refuses to
+        # answer. This is the same command an upgrading operator runs.
+        tokentab.price_rows(con, rates)
         total = con.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
         print(f"make-demo: {total:,} synthetic events over {DAYS} days", file=sys.stderr)
 

@@ -234,7 +234,7 @@ it holds the store while it runs; a minute or so per million events.
 | File | What |
 |:--|:--|
 | `rates.json` | Published list prices per million tokens — what each model costs *today*. Sources are recorded in the file. |
-| `price_history.json` | What those prices used to be. Each record ends on the day a price stopped applying, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py` when it rewrites a price — dated `--as-of` or, failing that, the day the tool ran, which is not the day the vendor moved — a hand edit, the fallbacks, the aliases and the local reference rates are not logged and still re-price all history. Empty until something moves. |
+| `price_history.json` | What those prices used to be. Each record ends on the day a price stopped applying, and prices every day before it — so an event that lands late, and a `reprice`, both price a past day at what it actually cost. What keeps last month's report stable is the Value already stored on each event; this file is the correction path. Written by `tools/update-rates.py` when it rewrites a price — dated `--as-of` or, failing that, the day the tool ran, which is not the day the vendor moved — a hand edit, the fallbacks, the aliases and the local reference rates are not logged, so a `reprice` re-prices all history at those. Empty until something moves. |
 | `plans.json` | Flat-plan templates (`monthly_usd`, `cycle_day`, `active_from`/`active_to`), per-account overrides, host display names, attribution roots. **Gitignored** — it names your accounts. Start from `plans.example.json`. |
 
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,

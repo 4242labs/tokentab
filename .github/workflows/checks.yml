@@ -21,3 +21,7 @@ jobs:
       # a separate run of the same tool. A failure here is a broken rule, never a
       # vendor being slow.
       - run: python3 tools/update-rates.py --self-check
+      # The only end-to-end run of `summarise` in the repo: it builds a store,
+      # prices it and asks for every view the dashboard can reach. The rates
+      # self-check above passes happily while this is broken.
+      - run: python3 tools/make-demo.py -o /tmp/demo.json
