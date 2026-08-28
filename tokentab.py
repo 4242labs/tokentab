@@ -141,6 +141,20 @@ def load_json(name: str) -> dict:
     return json.loads((CONFIG_DIR / name).read_text())
 
 
+# What a rate is allowed to say. Every price field multiplies a token count in
+# `value_of`; the two flags are provenance, and carry no number. Anything else
+# in a rate is a typo — silently ignored, it prices at whatever the misspelt
+# field defaults to, which is zero.
+RATE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+RATE_FLAGS = ("estimated", "reference")
+
+# The event column each price field multiplies. `verify` uses it to ask the one
+# question a truncated past price turns on: did this store actually hold tokens
+# of that kind on the days that record covers?
+RATE_COLS = {"input": "input", "output": "output", "cache_read": "cache_read",
+             "cache_write_5m": "cache_write", "cache_write_1h": "cache_write_1h"}
+
+
 def load_rates() -> dict:
     rates = load_json("rates.json")
     # What models used to cost, so a report of last month keeps last month's
@@ -174,12 +188,21 @@ def load_rates() -> dict:
             # Every field, not just the two required ones: a quoted cache rate
             # multiplies a token count in `value_of` and raises a TypeError out
             # of whatever asked for a report — the traceback this guard exists
-            # to replace with a sentence about the file the human edited.
-            bad = [k for k, v in r.items()
-                   if k != "until" and (isinstance(v, bool) or not isinstance(v, (int, float)))]
+            # to replace with a sentence about the file the human edited. The
+            # flags are the exception, and the reason this checks by name: they
+            # are booleans, and a bool is an int that would price at 1.
+            bad = [k for k, v in r.items() if k in RATE_FIELDS
+                   and (isinstance(v, bool) or not isinstance(v, (int, float)))]
             if bad:
                 raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
                                  f"{r['until']} has a non-numeric {', '.join(sorted(bad))}")
+            # A field this does not know is a misspelt one: `value_of` reads by
+            # name, so `inpt` prices at zero and nothing ever says so.
+            unknown = set(r) - {"until", *RATE_FIELDS, *RATE_FLAGS}
+            if unknown:
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has no such rate field: "
+                                 f"{', '.join(sorted(unknown))}")
     rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
     return rates
 
@@ -660,6 +683,24 @@ def price_rows(con, rates: dict, *, apply: bool = True, chunk: int = 20_000) -> 
     half way leaves a total that is true of no rate table at all, and no reader
     can tell. Every row or none.
     """
+    # `rate_for` reaches the log only after the name resolves inside `models`, so
+    # a model that has left rates.json is priced for every day by the fallback —
+    # or by whatever shorter name it now collapses onto. A reprice would
+    # overwrite correctly dated Values with that, and report only how many rows
+    # it rewrote. `verify` catches it too, but only after the writing is done.
+    # Refuse instead: the log is still there, and naming the model in rates.json
+    # again is the whole fix.
+    alias = rates.get("aliases", {})
+    present = {alias.get(r["model"], r["model"])
+               for r in con.execute("SELECT DISTINCT model FROM events")}
+    lost = sorted(m for m in rates.get("_history", ()) if m in present and m not in rates["models"])
+    if lost:
+        raise SystemExit(f"tokentab: {', '.join(lost)} has past prices logged but no current one "
+                         f"— rates.json no longer names it, so repricing would value every day "
+                         f"of it at the fallback rate and throw the logged prices away. Put the "
+                         f"model back in rates.json (or delete its price_history.json records "
+                         f"if the events are gone). Nothing was written.")
+
     # rowid, not id: `NULL > ''` is NULL and `'' > ''` is false, so a row that
     # reached the store without an id would be stepped straight over — and this
     # is the command every refusal tells the operator to run. It would have said
@@ -1053,10 +1094,14 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         # later price change can reach these numbers.
         sel = f"{group}, " if group else ""
         by = f" GROUP BY {group}" if group else ""
+        # `blank` only on the ungrouped total: it is the same rows either way,
+        # and the total is what refuses. Counting it per group would ask eight
+        # more times for an answer nothing reads.
+        blank = "" if group else ", SUM(value_usd IS NULL) blank"
         q = (f"SELECT {sel}SUM(value_usd) value, SUM(input) input, SUM(output) output, "
              f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n, "
-             f"SUM(value_usd IS NULL) blank FROM events WHERE {where}{by}")
+             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n"
+             f"{blank} FROM events WHERE {where}{by}")
         return con.execute(q, args).fetchall()
 
     def rollup(group: str) -> list[dict]:
@@ -1481,28 +1526,36 @@ def cmd_verify(args) -> int:
         ok &= flag == "PASS"
         print(f"  {label:<18} statusline ${a:>10,.2f}   report ${b:>10,.2f}   {flag}")
 
-    # 2. Rate spot-check: a hand-computed price for a known model, on the day it
-    #    was computed by hand. Pinning the day is what keeps this honest once
-    #    prices are dated — a vendor moving a rate must not fail a check about a
-    #    past day, and it must not quietly pass one either.
+    # 2. Rate spot-check: 1M in + 1M out is arithmetic anyone can do in their
+    #    head, so the answer catches a `value_of` that has stopped dividing by a
+    #    million, reads the wrong field, or hands a model another one's price.
+    #
+    #    The pair on the left was read off a vendor's page on `spot_day` and
+    #    cannot be kept current here — a price that moves later is meant to
+    #    leave this day exactly as it was. But a price change dated on or before
+    #    it (a backdated `--as-of`) legitimately supersedes the pin, and then a
+    #    hardcoded expectation would fail this check on every run, for good, with
+    #    nothing the operator could edit but this file. So: the pin is checked
+    #    while it still describes the day, and the arithmetic always is.
     spot_day = "2026-08-27"
     print(f"\nrate spot-check — 1M input + 1M output at the list price of {spot_day}")
-    for model, want in (("claude-opus-5", 5.0 + 25.0), ("claude-sonnet-5", 2.0 + 10.0),
-                        ("gpt-5.6-terra", 2.0 + 12.0)):
+    for model, pin in (("claude-opus-5", (5.0, 25.0)), ("claude-sonnet-5", (2.0, 10.0)),
+                       ("gpt-5.6-terra", (2.0, 12.0))):
+        r = rate_for(model, rates, day=spot_day)
+        book = (r.get("input"), r.get("output"))
         row = {"model": model, "day": spot_day, "input": 1_000_000, "output": 1_000_000,
                "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
         got = value_of(row, rates)
+        want = sum(pin) if book == pin else sum(v or 0 for v in book)
         flag = "PASS" if abs(got - want) < 1e-6 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {model:<18} expected ${want:>7,.2f}   got ${got:>7,.2f}   {flag}")
-        if flag == "FAIL":
-            # The figure on the left was computed by hand for this day, so a
-            # vendor moving a price later cannot reach it — the log keeps the
-            # day priced at what it was. Reaching it takes a price logged as
-            # having stopped applying on or before it, which is a backdated
-            # `--as-of`, or rates.json edited without logging what it replaced.
-            print(f"    a rate for {model} now applies to {spot_day} that did not price it "
-                  f"when this figure was computed — check price_history.json")
+        if book != pin:
+            print(f"    · priced from the book, not the pin: {spot_day} now costs "
+                  f"${sum(v or 0 for v in book):,.2f}, not the ${sum(pin):,.2f} written here "
+                  f"when this check was. Expected after a price change dated on or before "
+                  f"that day; if none was made, rates.json was edited without logging what "
+                  f"it replaced.")
 
     # 2a. The stored Values are the ledger; rates.json and the log are the book
     #     they were written from. They agree until someone corrects a rate, and
@@ -1530,7 +1583,6 @@ def cmd_verify(args) -> int:
     print("\ndated prices — every past rate is reachable, uniquely dated, and priceable")
     today = datetime.now(timezone.utc).date().isoformat()
     first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
-    flags = {"estimated", "reference"}
     bad, thin, records, live = [], [], 0, 0
     for model, recs in sorted(past.items()):
         records += len(recs)
@@ -1548,18 +1600,35 @@ def cmd_verify(args) -> int:
         # A field the current price charges for and a past record omits does not
         # value at the old rate — it values at nothing. On cache writes that is
         # the quietest way this file can be wrong.
-        charged = {k for k in rates["models"][model] if k not in flags}
-        for r in recs:
+        charged = {k for k in rates["models"][model] if k in RATE_FIELDS}
+        # Each record starts where the one before it ends; the first one starts
+        # at the beginning of time.
+        starts = ["0000-00-00"] + [r["until"] for r in recs]
+        for start, r in zip(starts, recs):
             if not {"input", "output"} <= r.keys():
                 bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
             elif charged - r.keys():
-                # Not a failure: a vendor that started charging for cache writes
-                # leaves exactly this, and the record is right — those fields
-                # cost nothing then. Worth saying, since a hand-truncated record
-                # looks identical and values real traffic at zero.
-                thin.append(f"{model}: the price ending {r['until']} says nothing about "
-                            f"{', '.join(sorted(charged - r.keys()))} — those value at zero "
-                            f"on the days it covers")
+                # A vendor that only started charging for cache writes later
+                # leaves exactly this, and then the record is right: those
+                # fields cost nothing on the days it covers. A hand-truncated
+                # record looks identical and values real traffic at zero. The
+                # file cannot tell them apart — the store can. Tokens of that
+                # kind, on those days, are the difference between a note and a
+                # wrong number.
+                missing = sorted(charged - r.keys())
+                cols = [RATE_COLS[f] for f in missing]
+                used = con.execute(
+                    f"SELECT {' + '.join(f'SUM({c})' for c in cols)} n FROM events "
+                    f"WHERE model = ? AND day >= ? AND day < ?",
+                    (model, start, r["until"])).fetchone()["n"] or 0
+                said = (f"{model}: the price ending {r['until']} says nothing about "
+                        f"{', '.join(missing)}")
+                if used:
+                    bad.append(f"{said}, and this store holds {used:,} such token(s) on the "
+                               f"days it covers — they value at zero. Add the missing rate(s).")
+                else:
+                    thin.append(f"{said} — those value at zero on the days it covers, and "
+                                f"this store used none of them then")
             if r["until"] > today:
                 bad.append(f"{model}: a past price ending {r['until']} has not stopped applying")
             live += bool(first_day and r["until"] > first_day)

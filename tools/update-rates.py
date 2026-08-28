@@ -356,7 +356,16 @@ def self_check() -> int:
         # And the log is what tokentab prices past days from: before the change
         # the old rate, on and after it the new one. A row with no day at all —
         # an aggregate spanning several — prices at the current rate.
-        dated = {**json.loads(rates.read_text()), "_history": hist}
+        #
+        # Loaded, not hand-assembled. Building `_history` here instead is what
+        # let the two halves drift apart once already: `load_rates` is the only
+        # thing that decides which fields a record may carry, and it refuses the
+        # ones it does not know — so a log written with a field it rejects stops
+        # `report`, `verify`, `ingest` and `reprice` alike, every way out of it
+        # and the way back in. This is the round trip that would have said so.
+        tt.CONFIG_DIR = Path(d)
+        dated = tt.load_rates()
+        assert set(dated["_history"]) == set(hist), dated["_history"]
         old_day = {"model": "gpt-x", "provider": "openai", "day": "1999-01-01",
                    "input": 1_000_000, "output": 0, "cache_read": 0,
                    "cache_write": 0, "cache_write_1h": 0}
@@ -477,6 +486,18 @@ def log_past(path: Path, outgoing: list, until: str) -> int:
     except (OSError, json.JSONDecodeError) as e:
         raise SystemExit(f"could not read {path} ({e}) — rates.json left unchanged")
     hist = doc.setdefault("history", {})
+    # Hand-edited, by invitation: the file's own `_format` note tells the reader
+    # what a record looks like. Everything below sorts and compares on `until`,
+    # so a record without one is a traceback out of a tool documented as safe to
+    # run unattended — and this runs before the write, so nothing is half-logged.
+    if not isinstance(hist, dict):
+        raise SystemExit(f"{path}: `history` is not an object of model → prices. "
+                         f"rates.json left unchanged.")
+    for name, recs in hist.items():
+        if not isinstance(recs, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("until"), str) for r in recs):
+            raise SystemExit(f"{path}: {name} is not a list of prices each carrying an "
+                             f"`until` date. Fix it by hand; rates.json left unchanged.")
     written = 0
     for name, was in outgoing:
         recs = hist.setdefault(name, [])
