@@ -1,5 +1,5 @@
 {
-  "_comment": "Published list prices, USD per million tokens. Used to compute the 'Value' number (what the same usage would have cost at API list price). Update when vendors change prices; history re-prices automatically because value is computed at query time, never stored.",
+  "_comment": "Published list prices, USD per million tokens. Used to compute the 'Value' number (what the same usage would have cost at API list price). These are what a model costs *today*. When tools/update-rates.py moves a price here, the outgoing one is logged in price_history.json so a past day is still priced at what it actually cost. Events already stored keep the Value they were priced at; this file is read when a Value is written — at ingest, and by `tokentab reprice`. A price edited by hand is not logged, and neither are the fallbacks, the aliases or the local reference rates — a reprice re-prices all history at those.",
   "updated": "2026-08-27",
   "sources": {
     "litellm": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",

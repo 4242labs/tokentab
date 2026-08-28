@@ -11,7 +11,7 @@
 # "re-run this script" and never risks the two things that cannot be rebuilt:
 #
 #   ~/.local/share/tokentab/   code + web/dist   replaced wholesale every run
-#   ~/.config/tokentab/        rates + plans     plans.json is NEVER overwritten
+#   ~/.config/tokentab/        rates, history, plans   plans.json is NEVER overwritten
 #   ~/.local/share/tokentab/tokentab.db          the store — never touched here
 #   ~/.local/state/tokentab/   scan state, logs  prunable
 #
@@ -93,7 +93,33 @@ fi
 # ---------------------------------------------------------------- config
 
 # rates.json is repo-owned (published list prices), so the repo wins on upgrade.
-cp "$SRC/rates.json" "$CFG/rates.json"
+# price_history.json goes with it, always: it says what those prices used to be,
+# so a copy older than its rates.json would miss records and silently re-price
+# past days at today's rate.
+#
+# The log goes first, for the same reason tools/update-rates.py writes it first:
+# an interrupt between the two must not leave new prices beside a log that has
+# not learned the old ones. History-then-rates leaves the store priced exactly
+# as it was; the other order re-prices every past day at today's rate.
+#
+# Absent upstream is not "keep what is there" — a repo with no log is a repo
+# where no price has moved, and a stale copy would price past days at rates
+# nothing here still publishes. It is removed.
+#
+# Both are copied through a temp file and renamed into place: `cp` truncates the
+# destination before it writes, so a re-run interrupted mid-copy leaves half a
+# JSON file, and half a JSON file is one tokentab refuses to load — every
+# command, not just the one that reads prices. A rename either happened or did
+# not.
+if [ -f "$SRC/price_history.json" ]; then
+  cp "$SRC/price_history.json" "$CFG/price_history.json.tmp"
+  mv "$CFG/price_history.json.tmp" "$CFG/price_history.json"
+  say "history   $CFG/price_history.json"
+else
+  rm -f "$CFG/price_history.json"
+fi
+cp "$SRC/rates.json" "$CFG/rates.json.tmp"
+mv "$CFG/rates.json.tmp" "$CFG/rates.json"
 say "rates     $CFG/rates.json"
 
 # plans.json names the real accounts. It is gitignored, it is the one file here
@@ -256,3 +282,36 @@ EOF
 fi
 
 printf '\ntokentab %s installed.\n' "$VERSION"
+
+# An upgrade is "re-run this script", and a store written before events carried
+# their own Value has none on its old rows. Every report, the dashboard and the
+# status line refuse to add up a period holding one — correctly, rather than
+# answering $0.00 — so the upgrade has one manual step, and this is the only
+# place that would otherwise not mention it.
+DB="${TOKENTAB_DB:-$LIB/tokentab.db}"
+if [ -f "$DB" ] && python3 -c '
+import pathlib, sqlite3, sys
+# as_uri, not concatenation: a "#" in the path truncates the URI and drops
+# mode=ro, and a read-only probe that writes is not one.
+uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"
+try:
+    con = sqlite3.connect(uri, uri=True, timeout=2)
+    unpriced = con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone()
+except sqlite3.DatabaseError as e:
+    # No such column means a store older than the migration: every row needs
+    # pricing. Anything else — locked, corrupt, not a store — is not something
+    # to advise a reprice about, so say nothing.
+    unpriced = "no such column" in str(e)
+sys.exit(0 if unpriced else 1)
+' "$DB"; then
+  cat <<EOF
+
+  ACTION NEEDED: events already in the store carry no Value yet, and no report
+  will add up until they do. One command, once:
+
+    tokentab reprice --apply
+
+  It prices each event at the rate of its own day. A minute or so per million.
+
+EOF
+fi

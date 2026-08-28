@@ -181,7 +181,16 @@ def main() -> int:
     ap.add_argument("-o", "--out", default=str(HERE.parent / "web/public/demo.json"))
     args = ap.parse_args()
 
-    rates = json.loads((HERE.parent / "rates.json").read_text())
+    # The demo bundle is committed, so it has to price from the repo's own
+    # rates — not from whatever the person running this has installed. On a
+    # developer's machine `_config_dir` finds ~/.config/tokentab and the numbers
+    # come out of a table nobody reviewing the diff can see.
+    tokentab.CONFIG_DIR = HERE.parent
+    # load_rates, not a read of rates.json: it also loads price_history.json,
+    # which is what prices a past day at the rate that applied then. Reading
+    # the table alone would price 80 days of demo at today's rate and let a
+    # broken history go through this check unnoticed.
+    rates = tokentab.load_rates()
     today = datetime.now(timezone.utc).date()
 
     # The plans start when the data starts. Otherwise "All time" bills every
@@ -193,6 +202,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         con = tokentab.connect(Path(tmp) / "demo.db")
         build_store(con, today)
+        # The rows land with no Value, the way they do from any collector that
+        # predates the column, and a report of a window holding one refuses to
+        # answer. This is the same command an upgrading operator runs.
+        tokentab.price_rows(con, rates)
         total = con.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
         print(f"make-demo: {total:,} synthetic events over {DAYS} days", file=sys.stderr)
 

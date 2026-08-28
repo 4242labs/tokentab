@@ -18,6 +18,14 @@ Two rules keep this from doing damage:
     writes a literal 0 for a price it does not know — 304 of its entries carry
     one — and that is not a free model either. A field is copied only when it
     carries a positive number.
+  * **A price is never overwritten without being kept.** Events already stored
+    carry the Value they were priced at, but a backfill, a re-scan or a
+    `reprice` prices a past day from this file — so a rate cut today would
+    otherwise re-price every day since tokentab started. The outgoing price is
+    appended to price_history.json first, dated with `--as-of` or, failing that,
+    the day this ran — which is not the day the vendor moved, so the lag is
+    priced at the old rate. It is an add, never an edit, which is what makes
+    this safe to run unattended.
   * **Local models are never touched.** Their rates are marked `reference` —
     deliberate stand-ins for a comparable hosted model, not quotes — and no
     upstream can have an opinion about them.
@@ -38,11 +46,12 @@ import io
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -278,6 +287,23 @@ def self_check() -> int:
         assert after["models"]["half-x"] == {"input": 2.0, "output": 9.0, "estimated": True}
         assert after["updated"] != "2000-01-01" and "litellm" in after["sources"]
 
+        # Every price that was overwritten is logged first, so the days before
+        # today keep pricing at it. This is what makes the rewrite safe to run
+        # unattended: it adds a record, it never edits one.
+        today = datetime.now(timezone.utc).date().isoformat()
+        hist = json.loads((Path(d) / "price_history.json").read_text())["history"]
+        assert set(hist) == {"gpt-x", "half-x", "full-x"}, hist
+        assert hist["gpt-x"] == [{"until": today, "input": 9.0, "output": 8.0,
+                                  "estimated": True}], hist["gpt-x"]
+        # A model that was added has no past to keep, and a `reference` model is
+        # never rewritten, so neither of them is logged.
+        assert not {"claude-x", "new-x", "local-x"} & set(hist)
+        # A second change on the same day must not overwrite the record — it
+        # already describes every day before today, and none of those moved.
+        assert log_past(Path(d) / "price_history.json", [("gpt-x", {"input": 5.0})], today) == 0
+        assert json.loads((Path(d) / "price_history.json").read_text()
+                          )["history"]["gpt-x"][0]["input"] == 9.0
+
         # A model named twice is added once, not twice — a duplicate key is valid
         # JSON whose first copy nothing can ever see again.
         dupes = Path(d) / "dupes.json"
@@ -327,8 +353,185 @@ def self_check() -> int:
                "cache_read": 1, "cache_write": 1, "cache_write_1h": 1}
         assert tt.value_of(row, json.loads(rates.read_text())) > 0
 
+        # And the log is what tokentab prices past days from: before the change
+        # the old rate, on and after it the new one. A row with no day at all —
+        # an aggregate spanning several — prices at the current rate.
+        #
+        # Loaded, not hand-assembled. Building `_history` here instead is what
+        # let the two halves drift apart once already: `load_rates` is the only
+        # thing that decides which fields a record may carry, and it refuses the
+        # ones it does not know — so a log written with a field it rejects stops
+        # `report`, `verify`, `ingest` and `reprice` alike, every way out of it
+        # and the way back in. This is the round trip that would have said so.
+        tt.CONFIG_DIR = Path(d)
+        dated = tt.load_rates()
+        assert set(dated["_history"]) == set(hist), dated["_history"]
+        old_day = {"model": "gpt-x", "provider": "openai", "day": "1999-01-01",
+                   "input": 1_000_000, "output": 0, "cache_read": 0,
+                   "cache_write": 0, "cache_write_1h": 0}
+        assert tt.value_of(old_day, dated) == 9.0
+        assert tt.value_of({**old_day, "day": today}, dated) == 1.0
+        assert tt.value_of({k: v for k, v in old_day.items() if k != "day"}, dated) == 1.0
+
+        # Several records for one model, written out of order — the file is
+        # hand-editable and nothing about it is sorted. load_rates is what puts
+        # them in order, and without that the lookup returns the first record it
+        # happens to meet, which understates a past day without failing anything.
+        tt.CONFIG_DIR = Path(d)
+        (Path(d) / "price_history.json").write_text(json.dumps({"history": {"gpt-x": [
+            {"until": "2026-06-01", "input": 30.0, "output": 0.0},
+            {"until": "2026-02-01", "input": 10.0, "output": 0.0},
+            {"until": "2026-04-01", "input": 20.0, "output": 0.0},
+        ]}}))
+        loaded = tt.load_rates()
+        priced = [tt.value_of({**old_day, "day": day}, loaded) for day in
+                  ("2026-01-15", "2026-02-01", "2026-03-31", "2026-04-01", "2026-06-01", None)]
+        assert priced == [10.0, 20.0, 20.0, 30.0, 1.0, 1.0], priced
+
+        # And a log that would otherwise surface as a traceback out of `report`
+        # says which file and what is wrong with it instead.
+        for broken in ({"gpt-x": {}}, {"gpt-x": [{"input": 1.0, "output": 1.0}]},
+                       {"gpt-x": [{"until": "2026-06-01T00:00:00Z", "input": 1.0, "output": 1.0}]},
+                       {"gpt-x": [{"until": "2026-06-01", "output": 1.0}]}):
+            (Path(d) / "price_history.json").write_text(json.dumps({"history": broken}))
+            try:
+                tt.load_rates()
+            except SystemExit as e:
+                assert "price_history.json" in str(e), e
+            else:
+                raise AssertionError(f"loaded a log it cannot price from: {broken}")
+
+        # price_rows walks the store a chunk at a time, in rowid order. Walking it
+        # wrong loses rows quietly: a report is simply short, and nothing fails.
+        # So: more rows than one chunk, and the count has to be every one of
+        # them, twice — once unpriced, once as a full reprice. Two of them carry
+        # no id, because walking on `id` steps straight over those (`NULL > ''`
+        # is NULL, `'' > ''` is false) and leaves a store no report will add up
+        # and no command can fix.
+        (Path(d) / "price_history.json").write_text(json.dumps({"history": {}}))
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.executescript(tt.SCHEMA)
+        con.executemany(
+            "INSERT INTO events (id,ts,day,host,source,provider,billing,account,model,"
+            "project,repo,input,output,cache_read,cache_write,cache_write_1h,cash_usd,"
+            f"value_usd) VALUES ({','.join('?' * 18)})",
+            [(f"e{i:05d}", f"{today}T00:00:00Z", today, "h", "s", "openai", "metered", "",
+              "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for i in range(250)])
+        con.executemany(
+            "INSERT INTO events (id,ts,day,host,source,provider,billing,account,model,"
+            "project,repo,input,output,cache_read,cache_write,cache_write_1h,cash_usd,"
+            f"value_usd) VALUES ({','.join('?' * 18)})",
+            [(nid, f"{today}T00:00:00Z", today, "h", "s", "openai", "metered", "",
+              "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for nid in (None, "")])
+        con.commit()
+        loaded = tt.load_rates()
+
+        # A row carrying no Value adds nothing to a SUM, so a store migrated but
+        # never priced would report $0.00 rather than fail. That silence is the
+        # thing this whole change exists to remove: every report of a window
+        # holding one has to refuse.
+        window = {"preset": "all", "from": None, "to": None,
+                  "_from": date(2000, 1, 1), "_to": date(2999, 1, 1)}
+        blank = {k: None for k in tt.FILTER_COLS}
+        try:
+            tt.summarise(con, loaded, {}, window, blank)
+        except SystemExit as e:
+            assert "reprice" in str(e), e
+        else:
+            raise AssertionError("added up a window holding rows that carry no Value")
+
+        assert tt.price_rows(con, loaded, chunk=100) == 252
+        assert con.execute("SELECT COUNT(*) FROM events WHERE value_usd IS NULL").fetchone()[0] == 0
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 0
+        assert tt.summarise(con, loaded, {}, window, blank)["headline"]["value_usd"] > 0
+        loaded["models"]["gpt-x"]["input"] *= 2
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 252
+        # …and a dry run leaves every one of them exactly as it found them.
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 252
+
     print("  self-check: all rules hold")
     return 0
+
+
+def iso_date(v: str) -> bool:
+    """A real calendar date. 2026-99-99 has the shape and is not one, and every
+    comparison against it is a string comparison that would sort past December."""
+    try:
+        return bool(date.fromisoformat(v))
+    except ValueError:
+        return False
+
+
+# What a logged record may carry: the price fields, and the two provenance flags
+# `load_rates` allows beside them. Anything else in a rates.json entry is a hand
+# annotation, and copying it into the log makes the log unreadable.
+LOGGABLE = {*FIELDS, "estimated", "reference"}
+
+
+def log_past(path: Path, outgoing: list, until: str) -> int:
+    """Record what these models cost until `until`, so past days keep pricing at it.
+
+    Overwriting a price in rates.json is the one thing here that reaches
+    backwards: an event already stored keeps the Value it was priced at, but a
+    backfill, a re-scan or a `reprice` prices a past day from this file, so
+    without the log a rate cut yesterday re-prices every day it reaches.
+
+    Append-only, and always at the end: each record's implied start is the
+    previous record's `until`, so a date earlier than one already logged does
+    not add a period, it silently re-dates every period above it — the days
+    that were priced at the older rate get the newer one and vice versa. A
+    model that already has a record ending on this day keeps the one it has,
+    for the same reason: that record prices every day *before* today, and a
+    second change today does not alter a single one of them.
+    """
+    try:
+        doc = json.loads(path.read_text())
+    except FileNotFoundError:
+        doc = {}
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(f"could not read {path} ({e}) — rates.json left unchanged")
+    hist = doc.setdefault("history", {})
+    # Hand-edited, by invitation: the file's own `_format` note tells the reader
+    # what a record looks like. Everything below sorts and compares on `until`,
+    # so a record without one is a traceback out of a tool documented as safe to
+    # run unattended — and this runs before the write, so nothing is half-logged.
+    if not isinstance(hist, dict):
+        raise SystemExit(f"{path}: `history` is not an object of model → prices. "
+                         f"rates.json left unchanged.")
+    for name, recs in hist.items():
+        if not isinstance(recs, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("until"), str) for r in recs):
+            raise SystemExit(f"{path}: {name} is not a list of prices each carrying an "
+                             f"`until` date. Fix it by hand; rates.json left unchanged.")
+    written = 0
+    for name, was in outgoing:
+        recs = hist.setdefault(name, [])
+        newest = max((str(r.get("until", "")) for r in recs), default="")
+        if newest == until:
+            continue
+        if newest > until:
+            raise SystemExit(f"{name}: price_history.json already ends a price on {newest}, "
+                             f"which is after {until}. The outgoing price is always the "
+                             f"newest one — logging an earlier date would re-date every "
+                             f"period after it. rates.json left unchanged.")
+        # Filtered, not copied whole: `load_rates` refuses a record carrying a
+        # field it does not know, and refusing happens on every read — so one
+        # stray key in rates.json (a note somebody added by hand) would be
+        # logged here and then stop `report`, `verify` and `reprice` alike.
+        recs.append({"until": until,
+                     **{k: v for k, v in was.items() if k in LOGGABLE}})
+        recs.sort(key=lambda r: r["until"])
+        written += 1
+    if not written:
+        return 0
+    try:
+        tmp = path.with_name(path.name + ".tmp")   # an interrupt must not truncate it
+        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        raise SystemExit(f"could not write {path}: {e}")
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,9 +544,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source", default=SOURCE,
                     help="LiteLLM price table — a URL, or a path to a saved copy")
     ap.add_argument("--rates", default=str(RATES))
+    ap.add_argument("--as-of", metavar="YYYY-MM-DD",
+                    help="the day the new prices took effect. Defaults to today, which is the "
+                         "day this ran — every day between the vendor's change and this run is "
+                         "then priced at the old rate. Pass the real date when you know it.")
     args = ap.parse_args(argv)
     if args.self_check:
         return self_check()
+
+    # Checked here, not where it is used: down there it is only reached when this
+    # run happens to find drift, so a scheduled job with a typo in the date would
+    # pass every quiet week and fail on the one day it had a price to log.
+    if args.as_of:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.as_of) or not iso_date(args.as_of):
+            raise SystemExit(f"--as-of wants a YYYY-MM-DD date, not {args.as_of!r}")
+        # A price cannot stop applying tomorrow: `until` is the day the new rate
+        # takes over, so a future one prices days that have not happened at a rate
+        # nobody has charged, and `tokentab verify` fails on it afterwards.
+        if args.as_of > today:
+            raise SystemExit(f"--as-of {args.as_of} is in the future — a price can only have "
+                             f"stopped applying on a day that has happened.")
 
     src = Path(args.source)
     try:
@@ -484,13 +705,29 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"the updated date did not take — {path} left unchanged")
     if at and written.get("sources", {}).get("litellm") != SOURCE:
         raise SystemExit(f"the sources.litellm line did not take — {path} left unchanged")
+    # The outgoing prices, logged before the new ones land — and logged first, so
+    # an interrupt between the two leaves a record saying the days before today
+    # cost what rates.json still says they cost, which prices them exactly as
+    # before. Only a model that had a price: a newly added one has no past to
+    # keep, and neither does a change that moved no number (a dropped flag).
+    moved = [(n, own["models"][n]) for n, rate in changes if n in own["models"]
+             and any(abs(own["models"][n].get(f, -1) - rate.get(f, -1)) > 1e-9 for f in FIELDS)]
+    effective = args.as_of or today  # validated in main, before anything is fetched
+    logged = log_past(path.with_name("price_history.json"), moved, effective)
+
     try:
         tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate it
         tmp.write_text(text)
         os.replace(tmp, path)
     except OSError as e:
         raise SystemExit(f"could not write {path}: {e}")
-    print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.\n")
+    print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.")
+    if logged:
+        print(f"  {logged} outgoing price(s) logged to price_history.json — days before "
+              f"{effective} keep pricing at them."
+              + ("" if args.as_of else "  (--as-of sets that date; it is today by default, "
+                                       "which is when this ran, not when the vendor moved.)"))
+    print()
     return 1 if missed else 0
 
 

@@ -90,7 +90,11 @@ CREATE TABLE IF NOT EXISTS events (
   cache_read     INTEGER NOT NULL DEFAULT 0,
   cache_write    INTEGER NOT NULL DEFAULT 0,
   cache_write_1h INTEGER NOT NULL DEFAULT 0,
-  cash_usd       REAL NOT NULL DEFAULT 0  -- metered only; flat/local are always 0
+  cash_usd       REAL NOT NULL DEFAULT 0,  -- metered only; flat/local are always 0
+  -- What this usage was worth at the list price of the day it happened, written
+  -- once when the event lands. A price a vendor changes later cannot reach it.
+  -- NULL means not yet priced; only `reprice --apply` fills those in.
+  value_usd      REAL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_day     ON events(day);
@@ -101,15 +105,33 @@ CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
 -- account, ts) — nothing queries `ts` — freeing 9MB of index pages at that size.
 -- The pages go on the freelist, so the file stops growing rather than shrinking.
 DROP INDEX IF EXISTS ix_events_plan;
+-- Built by a build that probed for unpriced rows on every read. Nothing
+-- asks that question any more, so it is dead weight on stores that have it.
+DROP INDEX IF EXISTS ix_events_unpriced;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
 # Columns added after the first release. Applied to any store already on disk —
 # sqlite has no "add column if not exists".
-MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),)
+MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),
+              ("value_usd", "ALTER TABLE events ADD COLUMN value_usd REAL"))
 
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
+DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_day(v) -> bool:
+    """A real YYYY-MM-DD date. The shape alone is not enough: 2026-99-99 has it,
+    and every comparison here is a string comparison, so it would sort between
+    December and nothing and quietly move a price boundary."""
+    if not DAY_RE.fullmatch(str(v)):
+        return False
+    try:
+        date.fromisoformat(str(v))
+    except ValueError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- config
@@ -119,8 +141,70 @@ def load_json(name: str) -> dict:
     return json.loads((CONFIG_DIR / name).read_text())
 
 
+# What a rate is allowed to say. Every price field multiplies a token count in
+# `value_of`; the two flags are provenance, and carry no number. Anything else
+# in a rate is a typo — silently ignored, it prices at whatever the misspelt
+# field defaults to, which is zero.
+RATE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+RATE_FLAGS = ("estimated", "reference")
+
+# The event column each price field multiplies. `verify` uses it to ask the one
+# question a truncated past price turns on: did this store actually hold tokens
+# of that kind on the days that record covers?
+RATE_COLS = {"input": "input", "output": "output", "cache_read": "cache_read",
+             "cache_write_5m": "cache_write", "cache_write_1h": "cache_write_1h"}
+
+
 def load_rates() -> dict:
-    return load_json("rates.json")
+    rates = load_json("rates.json")
+    # What models used to cost, so a report of last month keeps last month's
+    # numbers when a vendor moves a price. Its own file: rates.json is a
+    # hand-aligned table the update tool rewrites as text, and this one is an
+    # append-only log. Absent is normal — no price has moved yet, and then every
+    # day prices at the current rate, exactly as before.
+    try:
+        past = load_json("price_history.json").get("history", {})
+    except FileNotFoundError:
+        past = {}
+    except (OSError, ValueError) as exc:
+        # Ignoring a log we cannot read would re-price every past day at today's
+        # rate without a word — the exact failure this file exists to prevent.
+        raise SystemExit(f"tokentab: {CONFIG_DIR / 'price_history.json'} is unreadable "
+                         f"({exc}) — past prices cannot be applied. Fix or delete it.")
+    # Checked here rather than where it is read: every one of these would
+    # otherwise surface as a traceback out of `report`, from a file a human is
+    # invited to edit. The date is compared as a string, so a date that is not
+    # one — or one carrying a time — silently moves the boundary.
+    for model, recs in past.items():
+        if not isinstance(recs, list):
+            raise SystemExit(f"tokentab: price_history.json — {model} is not a list of prices")
+        for r in recs:
+            if not isinstance(r, dict) or not is_day(r.get("until", "")):
+                raise SystemExit(f"tokentab: price_history.json — {model} has a price with no "
+                                 f"YYYY-MM-DD `until` date")
+            if not all(isinstance(r.get(f), (int, float)) for f in ("input", "output")):
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has no numeric input and output")
+            # Every field, not just the two required ones: a quoted cache rate
+            # multiplies a token count in `value_of` and raises a TypeError out
+            # of whatever asked for a report — the traceback this guard exists
+            # to replace with a sentence about the file the human edited. The
+            # flags are the exception, and the reason this checks by name: they
+            # are booleans, and a bool is an int that would price at 1.
+            bad = [k for k, v in r.items() if k in RATE_FIELDS
+                   and (isinstance(v, bool) or not isinstance(v, (int, float)))]
+            if bad:
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has a non-numeric {', '.join(sorted(bad))}")
+            # A field this does not know is a misspelt one: `value_of` reads by
+            # name, so `inpt` prices at zero and nothing ever says so.
+            unknown = set(r) - {"until", *RATE_FIELDS, *RATE_FLAGS}
+            if unknown:
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has no such rate field: "
+                                 f"{', '.join(sorted(unknown))}")
+    rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
+    return rates
 
 
 def load_plans() -> dict:
@@ -505,6 +589,35 @@ def cmd_scan(args) -> int:
 # ---------------------------------------------------------------- store
 
 
+BUSY = ("the store is busy — something else is writing to it, most likely "
+        "`tokentab reprice`. Nothing was read; try again when it is done.")
+
+
+def busy(exc: Exception) -> bool:
+    """`database is locked` / `database is table is locked` / `database is busy`
+    all mean the same thing to a reader: wait. Anything else is a real fault."""
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in str(exc) or "busy" in str(exc))
+
+
+def probe(con) -> list:
+    """The first read of any connection, and the one that meets a held lock.
+
+    `reprice` takes the write lock for as long as it takes to rewrite the table
+    — a quarter of a minute per million events — and the store is journalled,
+    not WAL, so every reader waits it out or gives up. Giving up is fine; giving
+    up with a traceback out of a PRAGMA is not, because a person looking at a
+    report has no way to read that as "something else is writing, try again".
+    Said once here, where every command's first touch goes through.
+    """
+    try:
+        return con.execute("PRAGMA table_info(events)").fetchall()
+    except sqlite3.OperationalError as exc:
+        if not busy(exc):
+            raise
+        raise SystemExit(f"tokentab: {BUSY}")
+
+
 def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
     """The one way into the store — and the one place the schema is brought up to date.
 
@@ -530,7 +643,7 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
         # next to the store you meant to read.
         con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
         con.row_factory = sqlite3.Row
-        have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        have = {r["name"] for r in probe(con)}
         if not have:
             raise RuntimeError("no events table — not a tokentab store")
         stale = [col for col, _ in MIGRATIONS if col not in have]
@@ -542,28 +655,102 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
     con = sqlite3.connect(path, timeout=timeout)
     con.row_factory = sqlite3.Row
     # migrate before the schema script runs: its indexes reference newer columns
-    have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+    have = {r["name"] for r in probe(con)}
     if have:
         for col, ddl in MIGRATIONS:
             if col not in have:
                 con.execute(ddl)
         con.commit()
     con.executescript(SCHEMA)
+    # No pricing here. Adding the column is migration and takes no time; filling
+    # a million rows in is work, and doing it inside `connect` meant every
+    # command that happened to open the store started its own copy of it, fought
+    # the others for the write lock, and killed whichever of them was an
+    # `ingest`. `reprice` does it, once, because it was asked to.
     return con
 
 
+def price_rows(con, rates: dict, *, apply: bool = True, chunk: int = 20_000) -> int:
+    """Write each row's Value at the list price of its own day. Returns rows changed.
+
+    This is the number every report adds up. Computing it at query time instead
+    meant a vendor moving a price silently rewrote history — so it is written
+    once, when the event lands, and only ever rewritten deliberately, by
+    `reprice`, when a rate turns out to have been wrong.
+
+    Read a chunk at a time — a million rows read whole is a quarter of a
+    gigabyte — but written in one transaction, because a repricing interrupted
+    half way leaves a total that is true of no rate table at all, and no reader
+    can tell. Every row or none.
+    """
+    # `rate_for` reaches the log only after the name resolves inside `models`, so
+    # a model that has left rates.json is priced for every day by the fallback —
+    # or, worse, by whatever shorter name it now collapses onto, which is another
+    # model's price table. A reprice would overwrite correctly dated Values with
+    # that and report only how many rows it rewrote. `verify` catches it too, but
+    # only after the writing is done. Refuse instead: the log is still there, and
+    # naming the model in rates.json again is the whole fix.
+    #
+    # Asked by putting the departed names back and seeing what the store's own
+    # model ids resolve to then — the same question `rate_for` asks, which is the
+    # only way to ask it about `claude-opus-4-5-20251101` when the log is filed
+    # under `claude-opus-4-5`.
+    dead = set(rates.get("_history", ())) - set(rates["models"])
+    if dead:
+        restored = {*rates["models"], *dead}
+        lost = sorted({m for r in con.execute("SELECT DISTINCT model FROM events")
+                       if (m := resolve_model(r["model"], rates, restored)) in dead})
+        if lost:
+            raise SystemExit(f"tokentab: {', '.join(lost)} has past prices logged but no current "
+                             f"one — rates.json no longer names it, so repricing would value "
+                             f"every day of it at another model's rate, or at the fallback, and "
+                             f"throw the logged prices away. Put the model back in rates.json "
+                             f"(or delete its price_history.json records if the events are "
+                             f"gone). Nothing was written.")
+
+    # rowid, not id: `NULL > ''` is NULL and `'' > ''` is false, so a row that
+    # reached the store without an id would be stepped straight over — and this
+    # is the command every refusal tells the operator to run. It would have said
+    # "nothing to do" about the only rows that were stopping the report.
+    q = ("SELECT rowid, day, model, provider, input, output, cache_read, cache_write, "
+         "cache_write_1h, value_usd FROM events WHERE rowid > ? ORDER BY rowid LIMIT ?")
+    last, total = 0, 0
+    while True:
+        rows = con.execute(q, (last, chunk)).fetchall()
+        if not rows:
+            break
+        last = rows[-1]["rowid"]
+        # Only the rows whose number actually moves, so a reprice that changes
+        # nothing writes nothing. The cursor is drained before the update runs.
+        changed = [(v, r["rowid"]) for r, v in ((r, value_of(r, rates)) for r in rows)
+                   if r["value_usd"] is None or abs(r["value_usd"] - v) > 1e-12]
+        total += len(changed)
+        if changed and apply:
+            con.executemany("UPDATE events SET value_usd = ? WHERE rowid = ?", changed)
+    if apply:
+        con.commit()
+    return total
+
+
 def cmd_ingest(args) -> int:
-    con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+    # Waits, where every other command gives up after five seconds. `scan` saves
+    # its offsets whether or not the `ingest` it is piped into survived, so an
+    # ingest that dies on a busy store does not just fail — it drops those events
+    # out of the incremental window for good. A `reprice` on a large store holds
+    # the write lock for a minute or two, and a cron push has nothing better to
+    # do than wait for it.
+    con = connect(Path(args.db).expanduser() if args.db else DB_PATH, timeout=300.0)
+    rates = load_rates()
     cols = (
         "id ts day host source provider billing plan account model project repo session "
-        "input output cache_read cache_write cache_write_1h cash_usd"
+        "input output cache_read cache_write cache_write_1h cash_usd value_usd"
     ).split()
     # Re-sending an event is a no-op except for one case: an event stored before
     # accounts existed gets its account filled in. Nothing else is ever rewritten.
     sql = (f"INSERT INTO events ({','.join(cols)}) VALUES ({','.join('?' * len(cols))}) "
            f"ON CONFLICT(id) DO UPDATE SET account = excluded.account "
            f"WHERE events.account = '' AND excluded.account <> ''")
-    seen = new = 0
+    seen = new = dropped = 0
     batch = []
     for line in sys.stdin:
         line = line.strip()
@@ -573,10 +760,23 @@ def cmd_ingest(args) -> int:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # No id, no deduplication: `ON CONFLICT(id)` never fires on a NULL, so a
+        # feed that omits one would insert the same event again on every run and
+        # inflate the total a little more each time. Counted, because a collector
+        # dropping events is worth knowing about and `scan` saves its offsets
+        # either way — silence here is a gap nobody can find later.
+        seen += 1
+        if not ev.get("id"):
+            dropped += 1
+            continue
         ev["day"] = ev["ts"][:10]
         ev["account"] = ev.get("account") or ""  # events from a pre-account collector
+        # Priced here, once, at the list rate of the day it happened. A collector
+        # need not send every token field, so the row is normalised first.
+        ev["value_usd"] = value_of({"model": ev["model"], "provider": ev.get("provider"),
+                                    "day": ev["day"],
+                                    **{c: ev.get(c) or 0 for c in TOKEN_COLS}}, rates)
         batch.append([ev.get(c) for c in cols])
-        seen += 1
         if len(batch) >= 5000:
             new += con.executemany(sql, batch).rowcount
             con.commit()
@@ -589,7 +789,38 @@ def cmd_ingest(args) -> int:
     )
     con.commit()
     print(f"tokentab ingest: {seen} received, {new} written (new or account backfilled), "
-          f"{seen - new} unchanged", file=sys.stderr)
+          f"{seen - new - dropped} unchanged" + (f", {dropped} dropped (no id)" if dropped else ""),
+          file=sys.stderr)
+    return 0
+
+
+def cmd_reprice(args) -> int:
+    """Rewrite stored Values from the current rates and price history.
+
+    The one deliberate way a past number moves. Value is written when an event
+    lands and nothing else touches it, so a rate that was wrong when it was
+    written stays wrong until this is run — which is the whole point: a
+    correction has to be asked for, not arrive with a price change.
+    """
+    con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+    try:
+        # Every row, in one transaction. On a large store that holds the write
+        # lock for a while, which is why it is a command someone runs and not
+        # something that happens to them: a `push` landing in the middle of it
+        # is a `push` that fails, and `scan` has already moved its offsets on.
+        n = price_rows(con, load_rates(), apply=args.apply)
+    except sqlite3.OperationalError as exc:
+        raise SystemExit(f"reprice: {exc} — something else is writing to the store. "
+                         f"Nothing was changed; try again when it is idle.")
+    if not n:
+        print("reprice: every row already priced as the rates say. Nothing to do.")
+    elif args.apply:
+        print(f"reprice: {n:,} row(s) rewritten.")
+    else:
+        # Exit 1, so a script can ask "is the store in step with the rates?"
+        # without parsing this line. Same answer `verify` gives, cheaper.
+        print(f"reprice: {n:,} row(s) would change — re-run with --apply.")
+        return 1
     return 0
 
 
@@ -661,25 +892,63 @@ def cmd_adopt(args) -> int:
 # ---------------------------------------------------------------- pricing
 
 
-def rate_for(model: str, rates: dict, provider: str | None = None) -> dict:
-    models = rates["models"]
-    aliases = rates.get("aliases", {})
-    m = aliases.get(model, model)
-    if m in rates.get("free_models", []):
-        return {k: 0.0 for k in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")}
+def resolve_model(model: str, rates: dict, models=None) -> str | None:
+    """The rates.json name that prices `model` — None when none of them does.
+
+    A collector stores the vendor's own id, dated build and all
+    (`claude-opus-4-5-20251101`), and rates.json is keyed by the family
+    (`claude-opus-4-5`). Everything that has an opinion about a model has to
+    walk the same alias-then-longest-prefix path to the same name, because the
+    price history is filed under the name this returns: anything re-deriving it
+    a shorter way looks the log up under a key that is never there, and finds
+    nothing wrong. `models` overrides the table, to ask what would resolve if a
+    name that has left rates.json were put back.
+    """
+    models = rates["models"] if models is None else models
+    m = rates.get("aliases", {}).get(model, model)
     if m in models:
-        return models[m]
+        return m
     best = None
     for k in models:
         if m.startswith(k) and (best is None or len(k) > len(best)):
             best = k
-    if best:
-        return models[best]
-    return rates["local_fallback"] if provider == "local" else rates["fallback"]
+    return best
+
+
+def rate_for(model: str, rates: dict, provider: str | None = None,
+             day: str | None = None) -> dict:
+    """The rate that priced `model` on `day` — today's rate when no day is given.
+
+    Without a day this is what it always was: the current price. With one, a
+    price that has since moved is looked up in the history log first, so
+    yesterday's usage keeps yesterday's number instead of being silently
+    re-priced every time a vendor changes a rate.
+    """
+    models = rates["models"]
+    if rates.get("aliases", {}).get(model, model) in rates.get("free_models", []):
+        return {k: 0.0 for k in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")}
+    m = resolve_model(model, rates)
+    # The identity of these two objects is what `verify` reads to say "no
+    # published rate for" — return them, never a copy.
+    if m is None:
+        return rates["local_fallback"] if provider == "local" else rates["fallback"]
+    if day is not None:
+        # `until` is exclusive and the records are sorted, so the first one the
+        # day still falls inside is the price that was in force.
+        for was in rates.get("_history", {}).get(m, ()):
+            if day < was["until"]:
+                return was
+    return models[m]
 
 
 def value_of(row, rates: dict) -> float:
-    r = rate_for(row["model"], rates, row["provider"] if "provider" in row.keys() else None)
+    cols = row.keys()
+    r = rate_for(row["model"], rates,
+                 row["provider"] if "provider" in cols else None,
+                 # Every caller that can group by day does. A row without one is
+                 # an aggregate spanning several — `verify`'s hand-built spot
+                 # check — and prices at the current rate.
+                 row["day"] if "day" in cols else None)
     return (
         row["input"] * r["input"]
         + row["output"] * r["output"]
@@ -842,15 +1111,20 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
     args = args + [frm, to]
 
     def agg(group: str | None):
-        # provider always rides along: it decides which fallback rate an unknown
-        # (local) model is priced at.
-        keys = [k for k in (group, "model", "provider") if k]
-        keys = list(dict.fromkeys(keys))
-        cols = ", ".join(keys)
-        q = (f"SELECT {cols}, SUM(input) input, SUM(output) output, "
+        # Value is stored on the row, priced at the list rate of the day the
+        # usage happened. So a breakdown adds it up and nothing more — no model
+        # and no provider have to ride along to look a rate up any more, and no
+        # later price change can reach these numbers.
+        sel = f"{group}, " if group else ""
+        by = f" GROUP BY {group}" if group else ""
+        # `blank` only on the ungrouped total: it is the same rows either way,
+        # and the total is what refuses. Counting it per group would ask eight
+        # more times for an answer nothing reads.
+        blank = "" if group else ", SUM(value_usd IS NULL) blank"
+        q = (f"SELECT {sel}SUM(value_usd) value, SUM(input) input, SUM(output) output, "
              f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n "
-             f"FROM events WHERE {where} GROUP BY {cols}")
+             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n"
+             f"{blank} FROM events WHERE {where}{by}")
         return con.execute(q, args).fetchall()
 
     def rollup(group: str) -> list[dict]:
@@ -858,7 +1132,7 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         for r in agg(group):
             k = r[group] or "—"
             a = acc.setdefault(k, {"key": k, "value": 0.0, "cash": 0.0, "tokens": 0, "events": 0})
-            a["value"] += value_of(r, rates)
+            a["value"] += r["value"] or 0.0
             a["cash"] += r["cash"] or 0.0
             a["tokens"] += sum(r[c] for c in TOKEN_COLS)
             a["events"] += r["n"]
@@ -866,7 +1140,18 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
 
     total = {"value": 0.0, "cash_metered": 0.0, "tokens": 0, "events": 0}
     for r in agg(None):
-        total["value"] += value_of(r, rates)
+        # An ungrouped SUM over no rows is one row of NULLs, not no rows at all.
+        if not r["n"]:
+            continue
+        # A row carrying no Value adds nothing to a SUM, so a store migrated but
+        # not yet priced would answer $0.00 and never say why. Asked of the same
+        # window that was just added up, so it costs nothing and cannot be wrong
+        # about rows outside it.
+        if r["blank"]:
+            raise SystemExit(f"tokentab: {r['blank']:,} of {r['n']:,} events in this period "
+                             f"carry no Value — the store was migrated but not priced. "
+                             f"Run `tokentab reprice --apply`.")
+        total["value"] += r["value"] or 0.0
         total["cash_metered"] += r["cash"] or 0.0
         total["tokens"] += sum(r[c] for c in TOKEN_COLS)
         total["events"] += r["n"]
@@ -961,23 +1246,18 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         "breakdown": {g: rollup(FILTER_COLS[g]) for g in
                       ("project", "provider", "model", "machine", "billing", "repo", "source",
                        "account")},
-        "daily": daily(con, rates, where, args),
+        "daily": daily(con, where, args),
         "notes": notes,
     }
 
 
-def daily(con, rates, where, args) -> list[dict]:
-    q = (f"SELECT day, model, provider, SUM(input) input, SUM(output) output, "
+def daily(con, where, args) -> list[dict]:
+    q = (f"SELECT day, SUM(value_usd) value, SUM(input) input, SUM(output) output, "
          f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-         f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n "
-         f"FROM events WHERE {where} GROUP BY day, model, provider ORDER BY day")
-    acc: dict[str, dict] = {}
-    for r in con.execute(q, args):
-        a = acc.setdefault(r["day"], {"day": r["day"], "value": 0.0, "tokens": 0})
-        a["value"] += value_of(r, rates)
-        a["tokens"] += sum(r[c] for c in TOKEN_COLS)
-    return [{"day": k, "value": round(v["value"], 4), "tokens": v["tokens"]}
-            for k, v in sorted(acc.items())]
+         f"SUM(cache_write_1h) cache_write_1h FROM events WHERE {where} "
+         f"GROUP BY day ORDER BY day")
+    return [{"day": r["day"], "value": round(r["value"] or 0.0, 4),
+             "tokens": sum(r[c] for c in TOKEN_COLS)} for r in con.execute(q, args)]
 
 
 def distinct_values(con) -> dict:
@@ -1057,8 +1337,15 @@ class Handler(BaseHTTPRequestHandler):
             if u.path.startswith("/api/"):
                 return self._send(404, b'{"error":"no such endpoint"}', "application/json")
             self._send_asset(u.path)
-        except Exception as e:  # keep the dashboard up, surface the error
-            self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+        # SystemExit is not an Exception, and `summarise` raises one at a store
+        # that was migrated but never priced. Uncaught it kills the thread with
+        # no reply at all, so the dashboard would hang rather than say why.
+        except (Exception, SystemExit) as e:  # keep the dashboard up, surface the error
+            # This connection is opened once per worker thread and reused, so the
+            # lock is met by a query, not by `probe` — the browser would be shown
+            # `database is locked`, which reads as data loss rather than as wait.
+            msg = BUSY if busy(e) else str(e)
+            self._send(500, json.dumps({"error": msg}).encode(), "application/json")
 
     def log_message(self, *a):  # quiet
         pass
@@ -1076,7 +1363,9 @@ def cmd_serve(args) -> int:
         # above runs first: by the time a worker opens, there is nothing to
         # recover.
         if not getattr(local, "con", None):
-            local.con = sqlite3.connect(db, check_same_thread=False)
+            # The same 5s the CLI waits: a reprice commits in bursts, and a
+            # request that arrives inside one should wait it out, not fail.
+            local.con = sqlite3.connect(db, check_same_thread=False, timeout=5.0)
             local.con.row_factory = sqlite3.Row
             local.con.execute("PRAGMA query_only = 1")
         return local.con
@@ -1132,7 +1421,7 @@ def cmd_report(args) -> int:
     return 0
 
 
-def statusline_numbers(con, rates: dict, plans: dict) -> dict:
+def statusline_numbers(con, plans: dict) -> dict:
     """Today and the current cycle — the three numbers a status line needs.
 
     `summarise` answers the same question, but to do it builds eight breakdown
@@ -1149,13 +1438,17 @@ def statusline_numbers(con, rates: dict, plans: dict) -> dict:
     today = datetime.now(timezone.utc).date().isoformat()
     out = {"today": 0.0, "value": 0.0, "cash": 0.0}
     for r in con.execute(
-        "SELECT day, model, provider, SUM(input) input, SUM(output) output, "
-        "SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-        "SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash "
-        "FROM events WHERE day >= ? AND day < ? GROUP BY day, model, provider",
+        "SELECT day, SUM(value_usd) value, SUM(cash_usd) cash, SUM(value_usd IS NULL) blank "
+        "FROM events WHERE day >= ? AND day < ? GROUP BY day",
         (frm.isoformat(), to.isoformat()),
     ):
-        v = value_of(r, rates)
+        # A store migrated but not priced would render $0.00 into someone's
+        # prompt on every keystroke, and a reader cannot fix it. Saying nothing
+        # is the honest answer; TOKENTAB_DEBUG says why.
+        if r["blank"]:
+            raise RuntimeError(f"{r['blank']:,} events on {r['day']} carry no Value — "
+                               f"run `tokentab reprice --apply`")
+        v = r["value"] or 0.0
         out["value"] += v
         out["cash"] += r["cash"] or 0.0
         if r["day"] == today:
@@ -1186,8 +1479,10 @@ def cmd_statusline(args) -> int:
         # mistyped path, must not migrate or index one, and must not wait on one
         # `ingest` is mid-commit on.
         con = connect(path, write=False, timeout=0.2)
-        n = statusline_numbers(con, load_rates(), load_plans())
-    except Exception as exc:  # never break the prompt
+        n = statusline_numbers(con, load_plans())
+    # SystemExit is not an Exception. A config file this cannot read raises one,
+    # and the whole point of this guard is that no file can break a prompt.
+    except (Exception, SystemExit) as exc:  # never break the prompt
         if os.environ.get("TOKENTAB_DEBUG"):
             print(f"tokentab statusline: {exc}", file=sys.stderr)
         return 0
@@ -1203,6 +1498,15 @@ def cmd_verify(args) -> int:
     con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
     rates, plans = load_rates(), load_plans()
     ok = True
+
+    # First, because every check below asks for a report and a report of a
+    # period holding an unpriced row refuses to answer. Told here rather than
+    # hit as a stack trace out of the first check.
+    unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
+    if unpriced:
+        print(f"! {unpriced:,} row(s) carry no Value — the store was migrated but never "
+              f"priced, and no report will add up until `tokentab reprice --apply` has run.")
+        return 1
 
     # 1. Conservation: over a whole billing cycle, per-project allocations must
     #    sum back to the plan fee (to the cent).
@@ -1238,23 +1542,150 @@ def cmd_verify(args) -> int:
     print("\nstatusline agrees with report — same cycle, same numbers")
     cyc = resolve_period("cycle", None, None, plans)
     rep = summarise(con, rates, plans, cyc, {k: None for k in FILTER_COLS})["headline"]
-    sl = statusline_numbers(con, rates, plans)
+    sl = statusline_numbers(con, plans)
     for label, a, b in (("cash", sl["cash"], rep["cash_usd"]),
                         ("value", sl["value"], rep["value_usd"])):
         flag = "PASS" if abs(a - b) < 0.01 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {label:<18} statusline ${a:>10,.2f}   report ${b:>10,.2f}   {flag}")
 
-    # 2. Rate spot-check: a hand-computed price for a known model.
-    print("\nrate spot-check — 1M input + 1M output at list price")
-    for model, want in (("claude-opus-5", 5.0 + 25.0), ("claude-sonnet-5", 2.0 + 10.0),
-                        ("gpt-5.6-terra", 2.0 + 12.0)):
-        row = {"model": model, "input": 1_000_000, "output": 1_000_000,
+    # 2. Rate spot-check: 1M in + 1M out is arithmetic anyone can do in their
+    #    head, so the answer catches a `value_of` that has stopped dividing by a
+    #    million, reads the wrong field, or hands a model another one's price.
+    #
+    #    The pair on the left was read off a vendor's page on `spot_day` and
+    #    cannot be kept current here — a price that moves later is meant to
+    #    leave this day exactly as it was. But a price change dated on or before
+    #    it (a backdated `--as-of`) legitimately supersedes the pin, and then a
+    #    hardcoded expectation would fail this check on every run, for good, with
+    #    nothing the operator could edit but this file. So: the pin is checked
+    #    while it still describes the day, and the arithmetic always is.
+    spot_day = "2026-08-27"
+    print(f"\nrate spot-check — 1M input + 1M output at the list price of {spot_day}")
+    for model, pin in (("claude-opus-5", (5.0, 25.0)), ("claude-sonnet-5", (2.0, 10.0)),
+                       ("gpt-5.6-terra", (2.0, 12.0))):
+        r = rate_for(model, rates, day=spot_day)
+        book = (r.get("input"), r.get("output"))
+        row = {"model": model, "day": spot_day, "input": 1_000_000, "output": 1_000_000,
                "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
         got = value_of(row, rates)
+        want = sum(pin) if book == pin else sum(v or 0 for v in book)
         flag = "PASS" if abs(got - want) < 1e-6 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {model:<18} expected ${want:>7,.2f}   got ${got:>7,.2f}   {flag}")
+        if book != pin:
+            print(f"    · priced from the book, not the pin: {spot_day} now costs "
+                  f"${sum(v or 0 for v in book):,.2f}, not the ${sum(pin):,.2f} written here "
+                  f"when this check was. Expected after a price change dated on or before "
+                  f"that day; if none was made, rates.json was edited without logging what "
+                  f"it replaced. Until the pin is updated to the new number, this line "
+                  f"only checks that the arithmetic multiplies — not that the price is right.")
+
+    # 2a. The stored Values are the ledger; rates.json and the log are the book
+    #     they were written from. They agree until someone corrects a rate, and
+    #     then they must be made to agree again on purpose rather than quietly.
+    print("\nstored Values agree with the rates they were priced from")
+    # Rows carrying no Value are not counted here — nothing gets this far with
+    # one; the check at the top of this command has already said so and stopped.
+    # `price_rows` refuses outright when a model with logged prices has left
+    # rates.json — right for a command that writes, wrong for the one command
+    # whose whole job is to say what is broken. Caught: the refusal becomes this
+    # check's failure, and the checks below it, including the one that names the
+    # departed model, still run.
+    try:
+        stale = price_rows(con, rates, apply=False)
+    except SystemExit as e:
+        print(f"  ! {str(e).removeprefix('tokentab: ')}")
+        print("  FAIL")
+        ok = False
+    else:
+        total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
+        print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value "
+              f"today's rates give them")
+        if stale:
+            print(f"  ! {stale:,} row(s) would price differently now — a rate changed "
+                  f"after they were written. Deliberate: run `tokentab reprice "
+                  f"--apply`. Not deliberate: the rate that moved is the one to look at.")
+        ok &= not stale
+        print(f"  {'FAIL' if stale else 'PASS'}")
+
+    # 2b. Dated prices: every day must resolve to exactly one rate. Falling
+    #     through to the current price makes that true for any day later than the
+    #     log, so what is left to check is the log itself — two records ending on
+    #     the same day would make "the first one the day falls inside" a coin
+    #     toss, and a record for a model that has since left rates.json prices
+    #     history nothing can see a current rate for.
+    past = rates.get("_history", {})
+    print("\ndated prices — every past rate is reachable, uniquely dated, and priceable")
+    today = datetime.now(timezone.utc).date().isoformat()
+    first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
+    # The store's model ids are the vendor's, dated build and all; the log is
+    # keyed by the rates.json family name. Asking the store about the log's key
+    # directly matches nothing and reads as "no such usage" — which is the
+    # answer that turns a wrong number back into a note.
+    priced_by: dict[str, list] = {}
+    for r in con.execute("SELECT DISTINCT model FROM events"):
+        priced_by.setdefault(resolve_model(r["model"], rates), []).append(r["model"])
+    bad, thin, records, live = [], [], 0, 0
+    for model, recs in sorted(past.items()):
+        records += len(recs)
+        # The log is keyed by the name `rate_for` resolves to, and it looks there
+        # only after resolving. A record filed under an alias, or under a name
+        # that has since been deleted and now collapses onto a shorter one, reads
+        # as valid history and is never read again.
+        if model not in rates["models"]:
+            bad.append(f"{model}: not a model rates.json prices — an alias, or a name that "
+                       f"has been removed; nothing will ever read these records")
+            continue
+        ends = [r["until"] for r in recs]
+        if len(set(ends)) != len(ends):
+            bad.append(f"{model}: two past prices end on the same day")
+        # A field the current price charges for and a past record omits does not
+        # value at the old rate — it values at nothing. On cache writes that is
+        # the quietest way this file can be wrong.
+        charged = {k for k in rates["models"][model] if k in RATE_FIELDS}
+        # Each record starts where the one before it ends; the first one starts
+        # at the beginning of time.
+        starts = ["0000-00-00"] + [r["until"] for r in recs]
+        for start, r in zip(starts, recs):
+            if not {"input", "output"} <= r.keys():
+                bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
+            elif charged - r.keys():
+                # A vendor that only started charging for cache writes later
+                # leaves exactly this, and then the record is right: those
+                # fields cost nothing on the days it covers. A hand-truncated
+                # record looks identical and values real traffic at zero. The
+                # file cannot tell them apart — the store can. Tokens of that
+                # kind, on those days, are the difference between a note and a
+                # wrong number.
+                missing = sorted(charged - r.keys())
+                cols = [RATE_COLS[f] for f in missing]
+                ids = priced_by.get(model, [])
+                used = 0
+                if ids:
+                    used = con.execute(
+                        f"SELECT {' + '.join(f'SUM({c})' for c in cols)} n FROM events "
+                        f"WHERE model IN ({','.join('?' * len(ids))}) AND day >= ? AND day < ?",
+                        (*ids, start, r["until"])).fetchone()["n"] or 0
+                said = (f"{model}: the price ending {r['until']} says nothing about "
+                        f"{', '.join(missing)}")
+                if used:
+                    bad.append(f"{said}, and this store holds {used:,} such token(s) on the "
+                               f"days it covers — they value at zero. Add the missing rate(s).")
+                else:
+                    thin.append(f"{said} — those value at zero on the days it covers, and "
+                                f"this store used none of them then")
+            if r["until"] > today:
+                bad.append(f"{model}: a past price ending {r['until']} has not stopped applying")
+            live += bool(first_day and r["until"] > first_day)
+    print(f"  {records} past price(s) across {len(past)} model(s); "
+          f"{live} of them price a day this store actually holds")
+    for line in thin:
+        print(f"  · {line}")
+    for line in bad:
+        print(f"  ! {line}")
+    ok &= not bad
+    print(f"  {'FAIL' if bad else 'PASS'}")
 
     # 3. Coverage: which sources and hosts have landed.
     print("\ncoverage")
@@ -1359,6 +1790,11 @@ def main(argv=None) -> int:
     s = sub.add_parser("statusline", help="one line of this cycle's spend, for a prompt or status bar")
     s.add_argument("--db")
     s.set_defaults(func=cmd_statusline)
+
+    s = sub.add_parser("reprice", help="rewrite stored Values from the current rates")
+    s.add_argument("--apply", action="store_true", help="write it (dry run by default)")
+    s.add_argument("--db")
+    s.set_defaults(func=cmd_reprice)
 
     s = sub.add_parser("verify", help="acceptance checks")
     s.add_argument("--db")

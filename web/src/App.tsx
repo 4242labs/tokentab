@@ -72,7 +72,13 @@ export default function App() {
           setError(null)
         }
       })
-      .catch((e: Error) => !stale && setError(e.message))
+      .catch((e: Error) => {
+        if (stale) return
+        setError(e.message)
+        // Not clearing this leaves the previous period's money on screen under
+        // an error about the one that failed, with nothing saying it is stale.
+        setData(null)
+      })
     return () => {
       stale = true
     }
@@ -141,13 +147,16 @@ export default function App() {
             </Alert>
           )}
 
-          {!data ? (
+          {/* Skeletons say "on its way". A failed fetch is not on its way, and four
+              cards shimmering forever under the sentence explaining why there are
+              no numbers reads as one still loading. */}
+          {!data && !error ? (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
                 <Skeleton key={i} className="h-32 rounded-xl" />
               ))}
             </div>
-          ) : (
+          ) : data ? (
             <>
               <HeadlineCards h={data.headline} />
 
@@ -189,7 +198,7 @@ export default function App() {
                 ))}
               </div>
             </>
-          )}
+          ) : null}
 
           <p className="pb-4 text-xs text-muted-foreground">
             Flat-plan figures per project are allocated by token share, never measured. Value prices

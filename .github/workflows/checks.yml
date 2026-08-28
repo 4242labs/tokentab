@@ -1,0 +1,27 @@
+# The rules in tools/update-rates.py are the ones that would break silently: it
+# rewrites the file every Value number is computed from. Its self-check was
+# runnable but manual, which means nobody ran it.
+name: checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  self-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # No network: the self-check runs against a fixture, and the price fetch is
+      # a separate run of the same tool. A failure here is a broken rule, never a
+      # vendor being slow.
+      - run: python3 tools/update-rates.py --self-check
+      # The only end-to-end run of `summarise` in the repo: it builds a store,
+      # prices it and asks for every view the dashboard can reach. The rates
+      # self-check above passes happily while this is broken.
+      - run: python3 tools/make-demo.py -o /tmp/demo.json
