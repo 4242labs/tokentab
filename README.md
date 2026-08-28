@@ -214,7 +214,7 @@ priceable, and still belongs to a model `rates.json` prices today.
 | File | What |
 |:--|:--|
 | `rates.json` | Published list prices per million tokens — what each model costs *today*. Sources are recorded in the file. |
-| `price_history.json` | What those prices used to be. Each record ends on the day a price moved, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py`; empty until something moves. |
+| `price_history.json` | What those prices used to be. Each record ends on the day a price moved, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py` when it rewrites a price — a hand edit, the fallbacks, the aliases and the local reference rates are not logged and still re-price all history. Empty until something moves. |
 | `plans.json` | Flat-plan templates (`monthly_usd`, `cycle_day`, `active_from`/`active_to`), per-account overrides, host display names, attribution roots. **Gitignored** — it names your accounts. Start from `plans.example.json`. |
 
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
@@ -267,7 +267,9 @@ Everything else in the file — aliases, fallbacks, comments — is left
 byte-for-byte alone. Besides the prices, `--apply` touches only the `updated`
 date and adds a `sources.litellm` line if the file lacks one; a rewritten price
 object does lose its hand-kept column alignment. `price_history.json` is the one
-other file it writes, and it only ever appends to it.
+other file it writes, and it only ever adds records to it. Commit the two together —
+`rates.json` carrying a new price without the log entry behind it re-prices all history
+with nothing to show for it.
 
 `--self-check` runs the assertions behind those rules against a fixture,
 including one end-to-end `--apply` into a temporary file. A dry run exits 1 when

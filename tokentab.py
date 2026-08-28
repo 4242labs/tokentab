@@ -130,6 +130,11 @@ def load_rates() -> dict:
         past = load_json("price_history.json").get("history", {})
     except FileNotFoundError:
         past = {}
+    except (OSError, ValueError) as exc:
+        # Ignoring a log we cannot read would re-price every past day at today's
+        # rate without a word — the exact failure this file exists to prevent.
+        raise SystemExit(f"tokentab: {CONFIG_DIR / 'price_history.json'} is unreadable "
+                         f"({exc}) — past prices cannot be applied. Fix or delete it.")
     rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
     return rates
 
@@ -693,7 +698,7 @@ def rate_for(model: str, rates: dict, provider: str | None = None,
                 best = k
         # The identity of these two objects is what `verify` reads to say "no
         # published rate for" — return them, never a copy.
-        if best is None:
+        if not best:
             return rates["local_fallback"] if provider == "local" else rates["fallback"]
         m = best
     if day is not None:
@@ -877,12 +882,12 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
 
     def agg(group: str | None):
         # provider always rides along: it decides which fallback rate an unknown
-        # (local) model is priced at. `day` rides along only once some price has
-        # moved — it is what dates a row against the rate in force then, and it
-        # multiplies the group count by the length of the window, which is not
-        # worth paying while every day in the window prices the same.
-        keys = [k for k in (group, "model", "provider",
-                            "day" if rates.get("_history") else None) if k]
+        # (local) model is priced at, and `day` decides which of that model's past
+        # prices was in force. Always, even with an empty log: grouping by day
+        # only when it can change a number would leave the shape every report
+        # takes the day a vendor first moves a price with no coverage until then,
+        # and `daily` and the status line pay for it on every report regardless.
+        keys = [k for k in (group, "model", "provider", "day") if k]
         keys = list(dict.fromkeys(keys))
         cols = ", ".join(keys)
         q = (f"SELECT {cols}, SUM(input) input, SUM(output) output, "
@@ -1305,28 +1310,43 @@ def cmd_verify(args) -> int:
     #     toss, and a record for a model that has since left rates.json prices
     #     history nothing can see a current rate for.
     past = rates.get("_history", {})
-    if past:
-        print("\ndated prices — past rates are unique, priceable, and still current somewhere")
-        first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
-        bad, records = [], 0
-        for model, recs in sorted(past.items()):
-            records += len(recs)
-            if rate_for(model, rates) is rates["fallback"]:
-                bad.append(f"{model}: has past prices but no current one")
-            ends = [r["until"] for r in recs]
-            if len(set(ends)) != len(ends):
-                bad.append(f"{model}: two past prices end on the same day")
-            for r in recs:
-                if not {"input", "output"} <= r.keys():
-                    bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
-        live = sum(1 for recs in past.values() for r in recs
-                   if first_day and r["until"] > first_day)
-        print(f"  {records} past price(s) across {len(past)} model(s); "
-              f"{live} of them price a day this store actually holds")
-        for line in bad:
-            print(f"  ! {line}")
-        ok &= not bad
-        print(f"  {'FAIL' if bad else 'PASS'}")
+    print("\ndated prices — every past rate is reachable, unique, and prices the same fields")
+    today = datetime.now(timezone.utc).date().isoformat()
+    first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
+    flags = {"estimated", "reference"}
+    bad, records, live = [], 0, 0
+    for model, recs in sorted(past.items()):
+        records += len(recs)
+        # The log is keyed by the name `rate_for` resolves to, and it looks there
+        # only after resolving. A record filed under an alias, or under a name
+        # that has since been deleted and now collapses onto a shorter one, reads
+        # as valid history and is never read again.
+        if model not in rates["models"]:
+            bad.append(f"{model}: not a model rates.json prices — an alias, or a name that "
+                       f"has been removed; nothing will ever read these records")
+            continue
+        ends = [r["until"] for r in recs]
+        if len(set(ends)) != len(ends):
+            bad.append(f"{model}: two past prices end on the same day")
+        # A field the current price charges for and a past record omits does not
+        # value at the old rate — it values at nothing. On cache writes that is
+        # the quietest way this file can be wrong.
+        charged = {k for k in rates["models"][model] if k not in flags}
+        for r in recs:
+            if not {"input", "output"} <= r.keys():
+                bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
+            elif charged - r.keys():
+                bad.append(f"{model}: the price ending {r['until']} says nothing about "
+                           f"{', '.join(sorted(charged - r.keys()))} — those value at zero")
+            if r["until"] > today:
+                bad.append(f"{model}: a past price ending {r['until']} has not stopped applying")
+            live += bool(first_day and r["until"] > first_day)
+    print(f"  {records} past price(s) across {len(past)} model(s); "
+          f"{live} of them price a day this store actually holds")
+    for line in bad:
+        print(f"  ! {line}")
+    ok &= not bad
+    print(f"  {'FAIL' if bad else 'PASS'}")
 
     # 3. Coverage: which sources and hosts have landed.
     print("\ncoverage")
