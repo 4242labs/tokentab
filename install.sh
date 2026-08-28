@@ -11,7 +11,7 @@
 # "re-run this script" and never risks the two things that cannot be rebuilt:
 #
 #   ~/.local/share/tokentab/   code + web/dist   replaced wholesale every run
-#   ~/.config/tokentab/        rates + plans     plans.json is NEVER overwritten
+#   ~/.config/tokentab/        rates, history, plans   plans.json is NEVER overwritten
 #   ~/.local/share/tokentab/tokentab.db          the store — never touched here
 #   ~/.local/state/tokentab/   scan state, logs  prunable
 #
@@ -93,8 +93,15 @@ fi
 # ---------------------------------------------------------------- config
 
 # rates.json is repo-owned (published list prices), so the repo wins on upgrade.
+# price_history.json goes with it, always: it says what those prices used to be,
+# so a copy older than its rates.json would miss records and silently re-price
+# past days at today's rate. Absent upstream is fine — no price has moved yet.
 cp "$SRC/rates.json" "$CFG/rates.json"
 say "rates     $CFG/rates.json"
+if [ -f "$SRC/price_history.json" ]; then
+  cp "$SRC/price_history.json" "$CFG/price_history.json"
+  say "history   $CFG/price_history.json"
+fi
 
 # plans.json names the real accounts. It is gitignored, it is the one file here
 # a human edits, and it is not recoverable from the repo — so it is written once

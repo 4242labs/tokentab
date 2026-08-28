@@ -18,6 +18,11 @@ Two rules keep this from doing damage:
     writes a literal 0 for a price it does not know — 304 of its entries carry
     one — and that is not a free model either. A field is copied only when it
     carries a positive number.
+  * **A price is never overwritten without being kept.** Value is computed when a
+    report is asked for, so a rate cut today would otherwise re-price every day
+    since tokentab started. The outgoing price is appended to price_history.json
+    first, dated with the day it stopped applying — an add, never an edit, which
+    is what makes this safe to run unattended.
   * **Local models are never touched.** Their rates are marked `reference` —
     deliberate stand-ins for a comparable hosted model, not quotes — and no
     upstream can have an opinion about them.
@@ -278,6 +283,23 @@ def self_check() -> int:
         assert after["models"]["half-x"] == {"input": 2.0, "output": 9.0, "estimated": True}
         assert after["updated"] != "2000-01-01" and "litellm" in after["sources"]
 
+        # Every price that was overwritten is logged first, so the days before
+        # today keep pricing at it. This is what makes the rewrite safe to run
+        # unattended: it adds a record, it never edits one.
+        today = datetime.now(timezone.utc).date().isoformat()
+        hist = json.loads((Path(d) / "price_history.json").read_text())["history"]
+        assert set(hist) == {"gpt-x", "half-x", "full-x"}, hist
+        assert hist["gpt-x"] == [{"until": today, "input": 9.0, "output": 8.0,
+                                  "estimated": True}], hist["gpt-x"]
+        # A model that was added has no past to keep, and a `reference` model is
+        # never rewritten, so neither of them is logged.
+        assert not {"claude-x", "new-x", "local-x"} & set(hist)
+        # A second change on the same day must not overwrite the record — it
+        # already describes every day before today, and none of those moved.
+        assert log_past(Path(d) / "price_history.json", [("gpt-x", {"input": 5.0})], today) == 0
+        assert json.loads((Path(d) / "price_history.json").read_text()
+                          )["history"]["gpt-x"][0]["input"] == 9.0
+
         # A model named twice is added once, not twice — a duplicate key is valid
         # JSON whose first copy nothing can ever see again.
         dupes = Path(d) / "dupes.json"
@@ -327,8 +349,57 @@ def self_check() -> int:
                "cache_read": 1, "cache_write": 1, "cache_write_1h": 1}
         assert tt.value_of(row, json.loads(rates.read_text())) > 0
 
+        # And the log is what tokentab prices past days from: before the change
+        # the old rate, on and after it the new one. A row with no day at all —
+        # an aggregate spanning several — prices at the current rate.
+        dated = {**json.loads(rates.read_text()), "_history": hist}
+        old_day = {"model": "gpt-x", "provider": "openai", "day": "1999-01-01",
+                   "input": 1_000_000, "output": 0, "cache_read": 0,
+                   "cache_write": 0, "cache_write_1h": 0}
+        assert tt.value_of(old_day, dated) == 9.0
+        assert tt.value_of({**old_day, "day": today}, dated) == 1.0
+        assert tt.value_of({k: v for k, v in old_day.items() if k != "day"}, dated) == 1.0
+
     print("  self-check: all rules hold")
     return 0
+
+
+def log_past(path: Path, outgoing: list, until: str) -> int:
+    """Record what these models cost until `until`, so past days keep pricing at it.
+
+    Overwriting a price in rates.json is the one thing here that reaches
+    backwards: Value is computed when a report is asked for, so without this log
+    a rate cut yesterday quietly re-prices every day since tokentab started.
+
+    Append-only, and idempotent on the date: a model that already has a record
+    ending on this day keeps the one it has. That record is the price that was in
+    force for every day *before* today, and a second change today does not alter
+    a single one of them.
+    """
+    try:
+        doc = json.loads(path.read_text())
+    except FileNotFoundError:
+        doc = {}
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(f"could not read {path} ({e}) — rates.json left unchanged")
+    hist = doc.setdefault("history", {})
+    written = 0
+    for name, was in outgoing:
+        recs = hist.setdefault(name, [])
+        if any(r.get("until") == until for r in recs):
+            continue
+        recs.append({"until": until, **was})
+        recs.sort(key=lambda r: r["until"])
+        written += 1
+    if not written:
+        return 0
+    try:
+        tmp = path.with_name(path.name + ".tmp")   # an interrupt must not truncate it
+        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        raise SystemExit(f"could not write {path}: {e}")
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -484,13 +555,26 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"the updated date did not take — {path} left unchanged")
     if at and written.get("sources", {}).get("litellm") != SOURCE:
         raise SystemExit(f"the sources.litellm line did not take — {path} left unchanged")
+    # The outgoing prices, logged before the new ones land — and logged first, so
+    # an interrupt between the two leaves a record saying the days before today
+    # cost what rates.json still says they cost, which prices them exactly as
+    # before. Only a model that had a price: a newly added one has no past to
+    # keep, and neither does a change that moved no number (a dropped flag).
+    moved = [(n, own["models"][n]) for n, rate in changes if n in own["models"]
+             and any(abs(own["models"][n].get(f, -1) - rate.get(f, -1)) > 1e-9 for f in FIELDS)]
+    logged = log_past(path.with_name("price_history.json"), moved, today)
+
     try:
         tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate it
         tmp.write_text(text)
         os.replace(tmp, path)
     except OSError as e:
         raise SystemExit(f"could not write {path}: {e}")
-    print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.\n")
+    print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.")
+    if logged:
+        print(f"  {logged} outgoing price(s) logged to price_history.json — days before "
+              f"{today} keep pricing at them.")
+    print()
     return 1 if missed else 0
 
 

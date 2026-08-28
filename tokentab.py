@@ -120,7 +120,18 @@ def load_json(name: str) -> dict:
 
 
 def load_rates() -> dict:
-    return load_json("rates.json")
+    rates = load_json("rates.json")
+    # What models used to cost, so a report of last month keeps last month's
+    # numbers when a vendor moves a price. Its own file: rates.json is a
+    # hand-aligned table the update tool rewrites as text, and this one is an
+    # append-only log. Absent is normal — no price has moved yet, and then every
+    # day prices at the current rate, exactly as before.
+    try:
+        past = load_json("price_history.json").get("history", {})
+    except FileNotFoundError:
+        past = {}
+    rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
+    return rates
 
 
 def load_plans() -> dict:
@@ -661,25 +672,48 @@ def cmd_adopt(args) -> int:
 # ---------------------------------------------------------------- pricing
 
 
-def rate_for(model: str, rates: dict, provider: str | None = None) -> dict:
+def rate_for(model: str, rates: dict, provider: str | None = None,
+             day: str | None = None) -> dict:
+    """The rate that priced `model` on `day` — today's rate when no day is given.
+
+    Without a day this is what it always was: the current price. With one, a
+    price that has since moved is looked up in the history log first, so
+    yesterday's usage keeps yesterday's number instead of being silently
+    re-priced every time a vendor changes a rate.
+    """
     models = rates["models"]
     aliases = rates.get("aliases", {})
     m = aliases.get(model, model)
     if m in rates.get("free_models", []):
         return {k: 0.0 for k in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")}
-    if m in models:
-        return models[m]
-    best = None
-    for k in models:
-        if m.startswith(k) and (best is None or len(k) > len(best)):
-            best = k
-    if best:
-        return models[best]
-    return rates["local_fallback"] if provider == "local" else rates["fallback"]
+    if m not in models:
+        best = None
+        for k in models:
+            if m.startswith(k) and (best is None or len(k) > len(best)):
+                best = k
+        # The identity of these two objects is what `verify` reads to say "no
+        # published rate for" — return them, never a copy.
+        if best is None:
+            return rates["local_fallback"] if provider == "local" else rates["fallback"]
+        m = best
+    if day is not None:
+        # `until` is exclusive and the records are sorted, so the first one the
+        # day still falls inside is the price that was in force.
+        for was in rates.get("_history", {}).get(m, ()):
+            if day < was["until"]:
+                return was
+    return models[m]
 
 
 def value_of(row, rates: dict) -> float:
-    r = rate_for(row["model"], rates, row["provider"] if "provider" in row.keys() else None)
+    cols = row.keys()
+    r = rate_for(row["model"], rates,
+                 row["provider"] if "provider" in cols else None,
+                 # Rows that are already an aggregate over several days carry no
+                 # day and price at the current rate. Every caller that can group
+                 # by day does; see `agg` in summarise for the one that only does
+                 # so once a price has actually moved.
+                 row["day"] if "day" in cols else None)
     return (
         row["input"] * r["input"]
         + row["output"] * r["output"]
@@ -843,8 +877,12 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
 
     def agg(group: str | None):
         # provider always rides along: it decides which fallback rate an unknown
-        # (local) model is priced at.
-        keys = [k for k in (group, "model", "provider") if k]
+        # (local) model is priced at. `day` rides along only once some price has
+        # moved — it is what dates a row against the rate in force then, and it
+        # multiplies the group count by the length of the window, which is not
+        # worth paying while every day in the window prices the same.
+        keys = [k for k in (group, "model", "provider",
+                            "day" if rates.get("_history") else None) if k]
         keys = list(dict.fromkeys(keys))
         cols = ", ".join(keys)
         q = (f"SELECT {cols}, SUM(input) input, SUM(output) output, "
@@ -1245,16 +1283,50 @@ def cmd_verify(args) -> int:
         ok &= flag == "PASS"
         print(f"  {label:<18} statusline ${a:>10,.2f}   report ${b:>10,.2f}   {flag}")
 
-    # 2. Rate spot-check: a hand-computed price for a known model.
-    print("\nrate spot-check — 1M input + 1M output at list price")
+    # 2. Rate spot-check: a hand-computed price for a known model, on the day it
+    #    was computed by hand. Pinning the day is what keeps this honest once
+    #    prices are dated — a vendor moving a rate must not fail a check about a
+    #    past day, and it must not quietly pass one either.
+    spot_day = "2026-08-27"
+    print(f"\nrate spot-check — 1M input + 1M output at the list price of {spot_day}")
     for model, want in (("claude-opus-5", 5.0 + 25.0), ("claude-sonnet-5", 2.0 + 10.0),
                         ("gpt-5.6-terra", 2.0 + 12.0)):
-        row = {"model": model, "input": 1_000_000, "output": 1_000_000,
+        row = {"model": model, "day": spot_day, "input": 1_000_000, "output": 1_000_000,
                "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
         got = value_of(row, rates)
         flag = "PASS" if abs(got - want) < 1e-6 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {model:<18} expected ${want:>7,.2f}   got ${got:>7,.2f}   {flag}")
+
+    # 2b. Dated prices: every day must resolve to exactly one rate. Falling
+    #     through to the current price makes that true for any day later than the
+    #     log, so what is left to check is the log itself — two records ending on
+    #     the same day would make "the first one the day falls inside" a coin
+    #     toss, and a record for a model that has since left rates.json prices
+    #     history nothing can see a current rate for.
+    past = rates.get("_history", {})
+    if past:
+        print("\ndated prices — past rates are unique, priceable, and still current somewhere")
+        first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
+        bad, records = [], 0
+        for model, recs in sorted(past.items()):
+            records += len(recs)
+            if rate_for(model, rates) is rates["fallback"]:
+                bad.append(f"{model}: has past prices but no current one")
+            ends = [r["until"] for r in recs]
+            if len(set(ends)) != len(ends):
+                bad.append(f"{model}: two past prices end on the same day")
+            for r in recs:
+                if not {"input", "output"} <= r.keys():
+                    bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
+        live = sum(1 for recs in past.values() for r in recs
+                   if first_day and r["until"] > first_day)
+        print(f"  {records} past price(s) across {len(past)} model(s); "
+              f"{live} of them price a day this store actually holds")
+        for line in bad:
+            print(f"  ! {line}")
+        ok &= not bad
+        print(f"  {'FAIL' if bad else 'PASS'}")
 
     # 3. Coverage: which sources and hosts have landed.
     print("\ncoverage")

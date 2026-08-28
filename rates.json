@@ -1,5 +1,5 @@
 {
-  "_comment": "Published list prices, USD per million tokens. Used to compute the 'Value' number (what the same usage would have cost at API list price). Update when vendors change prices; history re-prices automatically because value is computed at query time, never stored.",
+  "_comment": "Published list prices, USD per million tokens. Used to compute the 'Value' number (what the same usage would have cost at API list price). These are what a model costs *today*. When a vendor moves a price, the outgoing one is logged in price_history.json so past days keep pricing at what they actually cost.",
   "updated": "2026-08-27",
   "sources": {
     "litellm": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",

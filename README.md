@@ -205,13 +205,16 @@ WAL mode, which sqlite requires to read one at all. tokentab never turns WAL on;
 if you have, note that a WAL store in a read-only directory cannot be read.)
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
-plan fees over a whole cycle, and re-prices three models by hand against list rates.
+plan fees over a whole cycle, re-prices three models by hand against the list rates
+of a fixed day, and checks that every past price in `price_history.json` is unique,
+priceable, and still belongs to a model `rates.json` prices today.
 
 ## Configuration
 
 | File | What |
 |:--|:--|
-| `rates.json` | Published list prices per million tokens. Value is computed *at query time*, so correcting a rate re-prices all history. Sources are recorded in the file. |
+| `rates.json` | Published list prices per million tokens — what each model costs *today*. Sources are recorded in the file. |
+| `price_history.json` | What those prices used to be. Each record ends on the day a price moved, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py`; empty until something moves. |
 | `plans.json` | Flat-plan templates (`monthly_usd`, `cycle_day`, `active_from`/`active_to`), per-account overrides, host display names, attribution roots. **Gitignored** — it names your accounts. Start from `plans.example.json`. |
 
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
@@ -242,6 +245,12 @@ silent:
   `bedrock/…` and `azure/…` at those platforms' prices. Matching is anchored on
   the bare name, so a prefixed key can never win it; a model with no
   first-party quote is reported and left hand-maintained, never approximated.
+- **A price is never overwritten without being kept.** Value is computed when a
+  report is asked for, so a rate cut today would otherwise re-price every day
+  since tokentab started. The outgoing price is appended to `price_history.json`
+  first, dated with the day it stopped applying — an add, never an edit, and a
+  second run on the same day changes nothing, since the record it already wrote
+  describes those days correctly.
 - **Local models are never touched** — their rates are `reference` stand-ins,
   not quotes, and no upstream has an opinion about them.
 - **A model it cannot price is not added.** tokentab values every model on an
@@ -257,7 +266,8 @@ silent:
 Everything else in the file — aliases, fallbacks, comments — is left
 byte-for-byte alone. Besides the prices, `--apply` touches only the `updated`
 date and adds a `sources.litellm` line if the file lacks one; a rewritten price
-object does lose its hand-kept column alignment.
+object does lose its hand-kept column alignment. `price_history.json` is the one
+other file it writes, and it only ever appends to it.
 
 `--self-check` runs the assertions behind those rules against a fixture,
 including one end-to-end `--apply` into a temporary file. A dry run exits 1 when
