@@ -110,6 +110,12 @@ DROP INDEX IF EXISTS ix_events_plan;
 DROP INDEX IF EXISTS ix_events_unpriced;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+-- When each machine last reached this store, whether or not it had anything to
+-- send. Kept apart from the events because "sent nothing" and "said nothing"
+-- are different answers and only one of them is a fault: a laptop that was
+-- closed all day is quiet and healthy, a collector whose ssh has been failing
+-- for a week is quiet and broken, and the events look identical.
+CREATE TABLE IF NOT EXISTS hosts (host TEXT PRIMARY KEY, last_seen TEXT NOT NULL);
 """
 
 # Columns added after the first release. Applied to any store already on disk —
@@ -117,8 +123,18 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),
               ("value_usd", "ALTER TABLE events ADD COLUMN value_usd REAL"))
 
+# The collector runs hourly, with up to two minutes of jitter. Twice that is
+# late enough to mean something, and forgiving enough to survive one push that
+# failed because the tailnet blinked — which happens, and recovers by itself.
+HOST_LATE_HOURS = 2
+
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def utcnow() -> str:
+    """One spelling of now, because these strings are compared to each other."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def is_day(v) -> bool:
@@ -583,6 +599,13 @@ def cmd_scan(args) -> int:
                 continue
             out.write(json.dumps(ev, separators=(",", ":")) + "\n")
             n += 1
+    # Last, and always — a run that found nothing still reports the machine.
+    # Without it the store cannot tell a laptop that was closed from a collector
+    # whose push has been failing since Tuesday: both send no events. `ingest`
+    # takes this line off the stream and files it; anything else reading the
+    # NDJSON sees a line with no `id` and skips it, as it already does.
+    out.write(json.dumps({"heartbeat": {"host": host, "ts": utcnow()}},
+                         separators=(",", ":")) + "\n")
     out.flush()
     if not args.dry_run:
         state.save()
@@ -774,6 +797,15 @@ def cmd_ingest(args) -> int:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if beat := ev.get("heartbeat"):
+            # Not an event and not counted as one: it carries no usage, only the
+            # fact that a machine got this far. Written straight away rather than
+            # batched — a push that dies half way still proves contact.
+            con.execute("INSERT INTO hosts(host,last_seen) VALUES(?,?) "
+                        "ON CONFLICT(host) DO UPDATE SET last_seen=excluded.last_seen",
+                        (beat.get("host") or "?", beat.get("ts") or utcnow()))
+            con.commit()
+            continue
         # No id, no deduplication: `ON CONFLICT(id)` never fires on a NULL, so a
         # feed that omits one would insert the same event again on every run and
         # inflate the total a little more each time. Counted, because a collector
@@ -799,7 +831,7 @@ def cmd_ingest(args) -> int:
         new += con.executemany(sql, batch).rowcount
     con.execute(
         "INSERT INTO meta(k,v) VALUES('last_ingest',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-        (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
+        (utcnow(),),
     )
     con.commit()
     print(f"tokentab ingest: {seen} received, {new} written (new or account backfilled), "
@@ -1285,6 +1317,35 @@ def daily(con, where, args) -> list[dict]:
              "tokens": sum(r[c] for c in TOKEN_COLS)} for r in con.execute(q, args)]
 
 
+def machines(con) -> list:
+    """Every machine this store knows, and whether it is still reporting.
+
+    Two different clocks, deliberately. `last_seen` is contact — the collector
+    ran and reached the store — and it is the one that goes red, because it is
+    the only one a broken pipe stops. `last_event` is usage, and a machine with
+    nothing to report is not a fault, so it never colours anything.
+
+    A host that only ever appears in the events is one whose collector predates
+    heartbeats: it has no contact time, and saying "late" about it would be a
+    guess. It reads as unknown until its next push.
+    """
+    seen = {}
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone():
+        seen = {r["host"]: r["last_seen"] for r in con.execute("SELECT host, last_seen FROM hosts")}
+    used = {r["host"]: (r["last"], r["n"]) for r in con.execute(
+        "SELECT host, MAX(ts) last, COUNT(*) n FROM events GROUP BY host")}
+    late = (datetime.now(timezone.utc) - timedelta(hours=HOST_LATE_HOURS)) \
+        .isoformat(timespec="seconds")
+    out = []
+    for host in sorted({*seen, *used}):
+        last_event, events = used.get(host, (None, 0))
+        out.append({"host": host, "last_seen": seen.get(host), "last_event": last_event,
+                    "events": events,
+                    "state": "unknown" if host not in seen
+                             else "late" if seen[host] < late else "ok"})
+    return out
+
+
 def distinct_values(con) -> dict:
     out = {}
     for key, col in FILTER_COLS.items():
@@ -1347,6 +1408,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         try:
+            if u.path == "/api/machines":
+                return self._send(200, json.dumps(machines(self.server.get_con())).encode(),
+                                  "application/json")
             if u.path == "/api/filters":
                 return self._send(200, json.dumps(distinct_values(self.server.get_con())).encode(),
                                   "application/json")

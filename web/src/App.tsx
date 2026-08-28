@@ -6,6 +6,7 @@ import { BreakdownTable } from '@/components/BreakdownTable'
 import { DailyChart } from '@/components/DailyChart'
 import { FilterBar } from '@/components/FilterBar'
 import { HeadlineCards } from '@/components/HeadlineCards'
+import { MachinesCard } from '@/components/MachinesCard'
 import { PlansTable } from '@/components/PlansTable'
 import { SiteFooter } from '@/components/SiteFooter'
 import { ThemeSwitch } from '@/components/ThemeSwitch'
@@ -16,8 +17,10 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import {
   DEMO,
   fetchFilters,
+  fetchMachines,
   fetchSummary,
   type Filters,
+  type Machine,
   type Summary,
 } from '@/lib/api'
 import { shortDay } from '@/lib/format'
@@ -57,10 +60,22 @@ export default function App() {
   const [filters, setFilters] = useState<Filters>({ preset: 'cycle' })
   const [options, setOptions] = useState<Record<string, string[]>>({})
   const [data, setData] = useState<Summary | null>(null)
+  const [fleet, setFleet] = useState<Machine[]>([])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     fetchFilters().then(setOptions).catch((e: Error) => setError(e.message))
+  }, [])
+
+  // Not tied to the period: whether a machine is still reporting has nothing to
+  // do with which weeks you are looking at. Re-asked every five minutes so a
+  // dashboard left open on a wall does not keep showing a machine as healthy
+  // hours after it stopped.
+  useEffect(() => {
+    const load = () => fetchMachines().then(setFleet).catch(() => undefined)
+    void load()
+    const t = setInterval(load, 300_000)
+    return () => clearInterval(t)
   }, [])
 
   useEffect(() => {
@@ -169,6 +184,12 @@ export default function App() {
                     </Alert>
                   ))}
                 </div>
+              )}
+
+              {fleet.length > 0 && (
+                <Panel title="Machines">
+                  <MachinesCard rows={fleet} />
+                </Panel>
               )}
 
               <Panel title="Daily value">

@@ -45,6 +45,16 @@ export interface Summary {
   updated: string
 }
 
+export interface Machine {
+  host: string
+  /** Last time this machine reached the store — null before it ever has. */
+  last_seen: string | null
+  /** Last usage it reported. A machine can be healthy and have none. */
+  last_event: string | null
+  events: number
+  state: 'ok' | 'late' | 'unknown'
+}
+
 export type Filters = Record<string, string | undefined>
 
 /** Dimensions the API can both filter and break down by, in display order. */
@@ -101,6 +111,7 @@ interface DemoFixture {
   generated: string
   filters: Record<string, string[]>
   summaries: Record<string, Summary>
+  machines: Machine[]
 }
 
 let fixture: Promise<DemoFixture> | null = null
@@ -136,6 +147,9 @@ async function demoSummary(filters: Filters): Promise<Summary> {
     )
   return { ...base, notes }
 }
+
+export const fetchMachines = () =>
+  DEMO ? loadFixture().then((f) => f.machines) : get<Machine[]>('api/machines')
 
 export const fetchFilters = () =>
   DEMO ? loadFixture().then((f) => f.filters) : get<Record<string, string[]>>('api/filters')
