@@ -77,6 +77,9 @@
   --color-money-allocated: var(--money-allocated);
   --color-money-value: var(--money-value);
 
+  /* Machine health — see bridge.css. Red is --color-destructive already. */
+  --color-fleet-ok: var(--fleet-ok);
+
   /* shadcn sidebar contract -> design tokens (see bridge.css). */
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);

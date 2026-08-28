@@ -17,8 +17,8 @@ function ago(iso: string | null): string {
 }
 
 const DOT: Record<Machine['state'], string> = {
-  ok: 'bg-emerald-500',
-  late: 'bg-red-500',
+  ok: 'bg-fleet-ok',
+  late: 'bg-destructive',
   unknown: 'bg-muted-foreground/40',
 }
 
