@@ -227,6 +227,18 @@ def main() -> int:
                                      {c: filt.get(c) for c in tokentab.FILTER_COLS})
             out["updated"] = updated[:16].replace("T", " ") + " UTC"
             summaries[k] = out
+
+        # Heartbeats, so the machines panel has all three of its states to show.
+        # Invented like everything else here: one machine that checked in a
+        # minute ago, one that has been quiet long enough to go red, and one
+        # left out entirely — the shape of a collector too old to announce
+        # itself.
+        now = datetime.now(timezone.utc)
+        for host, minutes in (("nimbus", 1), ("foundry", 9 * 60)):
+            con.execute("INSERT INTO hosts(host,last_seen) VALUES(?,?) "
+                        "ON CONFLICT(host) DO UPDATE SET last_seen=excluded.last_seen",
+                        (host, (now - timedelta(minutes=minutes)).isoformat(timespec="seconds")))
+        fleet = tokentab.machines(con)
         con.close()
 
     payload = {
@@ -236,6 +248,7 @@ def main() -> int:
         "presets": PRESETS,
         "filters": options,
         "summaries": summaries,
+        "machines": fleet,
     }
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

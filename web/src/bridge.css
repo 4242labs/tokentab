@@ -119,6 +119,12 @@
   --money-cash: var(--accent-solid);
   --money-allocated: var(--amber-dark);
   --money-value: var(--blue-dark);
+
+  /* The machine-is-reporting dot. Emerald, not --money-cash: this is a health
+     signal, not a figure, and on dark the cash accent is Mint — a green dot one
+     hue from the headline number reads as part of it. Its opposite is
+     --destructive, which is already the DS red. */
+  --fleet-ok: var(--emerald-dark);
 }
 
 /*
@@ -176,4 +182,5 @@ body.theme-dark {
   --money-cash: var(--accent-solid);
   --money-allocated: var(--amber-light);
   --money-value: var(--blue-light);
+  --fleet-ok: var(--emerald-light);
 }
