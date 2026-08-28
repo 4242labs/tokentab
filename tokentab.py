@@ -163,7 +163,8 @@ def load_rates() -> dict:
     # append-only log. Absent is normal — no price has moved yet, and then every
     # day prices at the current rate, exactly as before.
     try:
-        past = load_json("price_history.json").get("history", {})
+        doc = load_json("price_history.json")
+        past = doc.get("history", {}) if isinstance(doc, dict) else doc
     except FileNotFoundError:
         past = {}
     except (OSError, ValueError) as exc:
@@ -175,6 +176,9 @@ def load_rates() -> dict:
     # otherwise surface as a traceback out of `report`, from a file a human is
     # invited to edit. The date is compared as a string, so a date that is not
     # one — or one carrying a time — silently moves the boundary.
+    if not isinstance(past, dict):
+        raise SystemExit(f"tokentab: price_history.json — expected an object of model → past "
+                         f"prices under `history`, found a {type(past).__name__}")
     for model, recs in past.items():
         if not isinstance(recs, list):
             raise SystemExit(f"tokentab: price_history.json — {model} is not a list of prices")
@@ -600,7 +604,7 @@ def busy(exc: Exception) -> bool:
         "locked" in str(exc) or "busy" in str(exc))
 
 
-def probe(con) -> list:
+def probe(con, path) -> list:
     """The first read of any connection, and the one that meets a held lock.
 
     `reprice` takes the write lock for as long as it takes to rewrite the table
@@ -616,6 +620,16 @@ def probe(con) -> list:
         if not busy(exc):
             raise
         raise SystemExit(f"tokentab: {BUSY}")
+    except sqlite3.DatabaseError as exc:
+        # A file that is not a database, or one a killed write left truncated,
+        # fails on the first statement to read a page — which is this one, for
+        # every command that opens the store. Same reasoning as the lock above:
+        # the traceback reads as a tokentab bug, and it is a broken file. Broad
+        # on purpose and safe only because this runs one PRAGMA and nothing else:
+        # a second statement here would need its own faults told apart.
+        raise SystemExit(f"tokentab: {path} is not readable as a tokentab store ({exc}) — "
+                         f"restore it from a copy, or move it aside and rebuild with "
+                         f"`tokentab backfill | tokentab ingest`.")
 
 
 def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
@@ -643,7 +657,7 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
         # next to the store you meant to read.
         con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
         con.row_factory = sqlite3.Row
-        have = {r["name"] for r in probe(con)}
+        have = {r["name"] for r in probe(con, path)}
         if not have:
             raise RuntimeError("no events table — not a tokentab store")
         stale = [col for col, _ in MIGRATIONS if col not in have]
@@ -655,7 +669,7 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
     con = sqlite3.connect(path, timeout=timeout)
     con.row_factory = sqlite3.Row
     # migrate before the schema script runs: its indexes reference newer columns
-    have = {r["name"] for r in probe(con)}
+    have = {r["name"] for r in probe(con, path)}
     if have:
         for col, ddl in MIGRATIONS:
             if col not in have:
@@ -906,13 +920,24 @@ def resolve_model(model: str, rates: dict, models=None) -> str | None:
     """
     models = rates["models"] if models is None else models
     m = rates.get("aliases", {}).get(model, model)
+    # Free first, and None rather than a name: `rate_for` zeroes these before it
+    # ever gets here, so whatever this returned went only to the callers that do
+    # not run that short-circuit — and they use the name to look up a price
+    # history. Listing a model in both tables is a rates.json mistake, and this
+    # reads free as the answer to it.
+    if m in rates.get("free_models", []):
+        return None
     if m in models:
         return m
-    best = None
-    for k in models:
-        if m.startswith(k) and (best is None or len(k) > len(best)):
-            best = k
-    return best
+    # The longest prefix decides, and then the boundary accepts or rejects it —
+    # in that order, not filtered inside the search. A dated build
+    # (`claude-opus-4-5-20251101`) is the same model as `claude-opus-4-5`; a
+    # `gpt-52` is not a `gpt-5`. Reject and search on, and `gpt-5.11` lands on
+    # `gpt-5` — a shorter name that ends at a separator by luck, and is still
+    # some other model. No name at all is the honest answer: it prices at the
+    # fallback and `verify` says so out loud.
+    best = max((k for k in models if m.startswith(k)), key=len, default=None)
+    return None if best is not None and m[len(best):len(best) + 1].isalnum() else best
 
 
 def rate_for(model: str, rates: dict, provider: str | None = None,
@@ -1628,7 +1653,12 @@ def cmd_verify(args) -> int:
         priced_by.setdefault(resolve_model(r["model"], rates), []).append(r["model"])
     bad, thin, records, live = [], [], 0, 0
     for model, recs in sorted(past.items()):
+        # Both counted before the departed-model `continue` below. Counting
+        # `live` past it made exactly the model this check is about report that
+        # none of its prices touch a day the store holds — the reassuring half of
+        # the header, printed for the one case where it is false.
         records += len(recs)
+        live += sum(bool(first_day and r["until"] > first_day) for r in recs)
         # The log is keyed by the name `rate_for` resolves to, and it looks there
         # only after resolving. A record filed under an alias, or under a name
         # that has since been deleted and now collapses onto a shorter one, reads
@@ -1677,7 +1707,6 @@ def cmd_verify(args) -> int:
                                 f"this store used none of them then")
             if r["until"] > today:
                 bad.append(f"{model}: a past price ending {r['until']} has not stopped applying")
-            live += bool(first_day and r["until"] > first_day)
     print(f"  {records} past price(s) across {len(past)} model(s); "
           f"{live} of them price a day this store actually holds")
     for line in thin:
