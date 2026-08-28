@@ -265,13 +265,17 @@ silent:
   `bedrock/…` and `azure/…` at those platforms' prices. Matching is anchored on
   the bare name, so a prefixed key can never win it; a model with no
   first-party quote is reported and left hand-maintained, never approximated.
-- **A price is never overwritten without being kept.** Value is computed when a
-  report is asked for, so a rate cut today would otherwise re-price every day
-  since tokentab started. The outgoing price is appended to `price_history.json`
-  first, dated `--as-of` or, failing that, the day the tool ran — which is not
-  the day the vendor moved, so pass the real date when you know it. It is an add,
-  never an edit: a second run on the same date changes nothing, since the record
-  it already wrote describes those days correctly.
+- **A price is never overwritten without being kept.** An event already stored
+  keeps the Value it was priced at, but a backfill, a re-scan or a `reprice`
+  prices a past day from this file — so without the log a rate cut today would
+  re-price every day it reaches. The outgoing price is appended to
+  `price_history.json` first, dated `--as-of` or, failing that, the day the
+  tool ran — which is not the day the vendor moved, so pass the real date when
+  you know it. It has to be the newest date in the log: each record starts
+  where the one before it ends, so an earlier one would re-date every period
+  after it, and the tool refuses. It is an add, never an edit: a second run on
+  the same date changes nothing, since the record it already wrote describes
+  those days correctly.
 - **Local models are never touched** — their rates are `reference` stand-ins,
   not quotes, and no upstream has an opinion about them.
 - **A model it cannot price is not added.** tokentab values every model on an

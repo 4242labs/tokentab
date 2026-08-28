@@ -171,6 +171,15 @@ def load_rates() -> dict:
             if not all(isinstance(r.get(f), (int, float)) for f in ("input", "output")):
                 raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
                                  f"{r['until']} has no numeric input and output")
+            # Every field, not just the two required ones: a quoted cache rate
+            # multiplies a token count in `value_of` and raises a TypeError out
+            # of whatever asked for a report — the traceback this guard exists
+            # to replace with a sentence about the file the human edited.
+            bad = [k for k, v in r.items()
+                   if k != "until" and (isinstance(v, bool) or not isinstance(v, (int, float)))]
+            if bad:
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has a non-numeric {', '.join(sorted(bad))}")
     rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
     return rates
 
@@ -557,6 +566,35 @@ def cmd_scan(args) -> int:
 # ---------------------------------------------------------------- store
 
 
+BUSY = ("the store is busy — something else is writing to it, most likely "
+        "`tokentab reprice`. Nothing was read; try again when it is done.")
+
+
+def busy(exc: Exception) -> bool:
+    """`database is locked` / `database is table is locked` / `database is busy`
+    all mean the same thing to a reader: wait. Anything else is a real fault."""
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in str(exc) or "busy" in str(exc))
+
+
+def probe(con) -> list:
+    """The first read of any connection, and the one that meets a held lock.
+
+    `reprice` takes the write lock for as long as it takes to rewrite the table
+    — a quarter of a minute per million events — and the store is journalled,
+    not WAL, so every reader waits it out or gives up. Giving up is fine; giving
+    up with a traceback out of a PRAGMA is not, because a person looking at a
+    report has no way to read that as "something else is writing, try again".
+    Said once here, where every command's first touch goes through.
+    """
+    try:
+        return con.execute("PRAGMA table_info(events)").fetchall()
+    except sqlite3.OperationalError as exc:
+        if not busy(exc):
+            raise
+        raise SystemExit(f"tokentab: {BUSY}")
+
+
 def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
     """The one way into the store — and the one place the schema is brought up to date.
 
@@ -582,7 +620,7 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
         # next to the store you meant to read.
         con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
         con.row_factory = sqlite3.Row
-        have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        have = {r["name"] for r in probe(con)}
         if not have:
             raise RuntimeError("no events table — not a tokentab store")
         stale = [col for col, _ in MIGRATIONS if col not in have]
@@ -594,7 +632,7 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
     con = sqlite3.connect(path, timeout=timeout)
     con.row_factory = sqlite3.Row
     # migrate before the schema script runs: its indexes reference newer columns
-    have = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+    have = {r["name"] for r in probe(con)}
     if have:
         for col, ddl in MIGRATIONS:
             if col not in have:
@@ -622,21 +660,25 @@ def price_rows(con, rates: dict, *, apply: bool = True, chunk: int = 20_000) -> 
     half way leaves a total that is true of no rate table at all, and no reader
     can tell. Every row or none.
     """
-    q = ("SELECT id, day, model, provider, input, output, cache_read, cache_write, "
-         "cache_write_1h, value_usd FROM events WHERE id > ? ORDER BY id LIMIT ?")
-    last, total = "", 0
+    # rowid, not id: `NULL > ''` is NULL and `'' > ''` is false, so a row that
+    # reached the store without an id would be stepped straight over — and this
+    # is the command every refusal tells the operator to run. It would have said
+    # "nothing to do" about the only rows that were stopping the report.
+    q = ("SELECT rowid, day, model, provider, input, output, cache_read, cache_write, "
+         "cache_write_1h, value_usd FROM events WHERE rowid > ? ORDER BY rowid LIMIT ?")
+    last, total = 0, 0
     while True:
         rows = con.execute(q, (last, chunk)).fetchall()
         if not rows:
             break
-        last = rows[-1]["id"]
+        last = rows[-1]["rowid"]
         # Only the rows whose number actually moves, so a reprice that changes
         # nothing writes nothing. The cursor is drained before the update runs.
-        changed = [(v, r["id"]) for r, v in ((r, value_of(r, rates)) for r in rows)
+        changed = [(v, r["rowid"]) for r, v in ((r, value_of(r, rates)) for r in rows)
                    if r["value_usd"] is None or abs(r["value_usd"] - v) > 1e-12]
         total += len(changed)
         if changed and apply:
-            con.executemany("UPDATE events SET value_usd = ? WHERE id = ?", changed)
+            con.executemany("UPDATE events SET value_usd = ? WHERE rowid = ?", changed)
     if apply:
         con.commit()
     return total
@@ -660,7 +702,7 @@ def cmd_ingest(args) -> int:
     sql = (f"INSERT INTO events ({','.join(cols)}) VALUES ({','.join('?' * len(cols))}) "
            f"ON CONFLICT(id) DO UPDATE SET account = excluded.account "
            f"WHERE events.account = '' AND excluded.account <> ''")
-    seen = new = 0
+    seen = new = dropped = 0
     batch = []
     for line in sys.stdin:
         line = line.strip()
@@ -670,11 +712,14 @@ def cmd_ingest(args) -> int:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        # No id, no way back to the row. `id > ?` walks the table in id order and
-        # a NULL or empty one is unreachable by it, so `reprice` would report
-        # nothing to do while every report refuses to add the store up — and
-        # NULL never conflicts, so each run would insert the row again.
+        # No id, no deduplication: `ON CONFLICT(id)` never fires on a NULL, so a
+        # feed that omits one would insert the same event again on every run and
+        # inflate the total a little more each time. Counted, because a collector
+        # dropping events is worth knowing about and `scan` saves its offsets
+        # either way — silence here is a gap nobody can find later.
+        seen += 1
         if not ev.get("id"):
+            dropped += 1
             continue
         ev["day"] = ev["ts"][:10]
         ev["account"] = ev.get("account") or ""  # events from a pre-account collector
@@ -684,7 +729,6 @@ def cmd_ingest(args) -> int:
                                     "day": ev["day"],
                                     **{c: ev.get(c) or 0 for c in TOKEN_COLS}}, rates)
         batch.append([ev.get(c) for c in cols])
-        seen += 1
         if len(batch) >= 5000:
             new += con.executemany(sql, batch).rowcount
             con.commit()
@@ -697,7 +741,8 @@ def cmd_ingest(args) -> int:
     )
     con.commit()
     print(f"tokentab ingest: {seen} received, {new} written (new or account backfilled), "
-          f"{seen - new} unchanged", file=sys.stderr)
+          f"{seen - new - dropped} unchanged" + (f", {dropped} dropped (no id)" if dropped else ""),
+          file=sys.stderr)
     return 0
 
 
@@ -1228,7 +1273,11 @@ class Handler(BaseHTTPRequestHandler):
         # that was migrated but never priced. Uncaught it kills the thread with
         # no reply at all, so the dashboard would hang rather than say why.
         except (Exception, SystemExit) as e:  # keep the dashboard up, surface the error
-            self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            # This connection is opened once per worker thread and reused, so the
+            # lock is met by a query, not by `probe` — the browser would be shown
+            # `database is locked`, which reads as data loss rather than as wait.
+            msg = BUSY if busy(e) else str(e)
+            self._send(500, json.dumps({"error": msg}).encode(), "application/json")
 
     def log_message(self, *a):  # quiet
         pass
@@ -1246,7 +1295,9 @@ def cmd_serve(args) -> int:
         # above runs first: by the time a worker opens, there is nothing to
         # recover.
         if not getattr(local, "con", None):
-            local.con = sqlite3.connect(db, check_same_thread=False)
+            # The same 5s the CLI waits: a reprice commits in bursts, and a
+            # request that arrives inside one should wait it out, not fail.
+            local.con = sqlite3.connect(db, check_same_thread=False, timeout=5.0)
             local.con.row_factory = sqlite3.Row
             local.con.execute("PRAGMA query_only = 1")
         return local.con
@@ -1385,16 +1436,8 @@ def cmd_verify(args) -> int:
     # hit as a stack trace out of the first check.
     unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
     if unpriced:
-        # A row with no id is not one `reprice` can reach — it walks the table in
-        # id order — so saying "run reprice" about one would be advice that does
-        # nothing. Written by an older build from a collector that sent no id.
-        lost = con.execute("SELECT COUNT(*) n FROM events "
-                           "WHERE COALESCE(id, '') = ''").fetchone()["n"]
         print(f"! {unpriced:,} row(s) carry no Value — the store was migrated but never "
               f"priced, and no report will add up until `tokentab reprice --apply` has run.")
-        if lost:
-            print(f"  ! {lost:,} of them carry no id either, and `reprice` cannot reach those. "
-                  f"Delete them: DELETE FROM events WHERE COALESCE(id, '') = ''")
         return 1
 
     # 1. Conservation: over a whole billing cycle, per-project allocations must
@@ -1452,6 +1495,14 @@ def cmd_verify(args) -> int:
         flag = "PASS" if abs(got - want) < 1e-6 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {model:<18} expected ${want:>7,.2f}   got ${got:>7,.2f}   {flag}")
+        if flag == "FAIL":
+            # The figure on the left was computed by hand for this day, so a
+            # vendor moving a price later cannot reach it — the log keeps the
+            # day priced at what it was. Reaching it takes a price logged as
+            # having stopped applying on or before it, which is a backdated
+            # `--as-of`, or rates.json edited without logging what it replaced.
+            print(f"    a rate for {model} now applies to {spot_day} that did not price it "
+                  f"when this figure was computed — check price_history.json")
 
     # 2a. The stored Values are the ledger; rates.json and the log are the book
     #     they were written from. They agree until someone corrects a rate, and

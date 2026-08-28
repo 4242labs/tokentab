@@ -181,7 +181,11 @@ def main() -> int:
     ap.add_argument("-o", "--out", default=str(HERE.parent / "web/public/demo.json"))
     args = ap.parse_args()
 
-    rates = json.loads((HERE.parent / "rates.json").read_text())
+    # load_rates, not a read of rates.json: it also loads price_history.json,
+    # which is what prices a past day at the rate that applied then. Reading
+    # the table alone would price 80 days of demo at today's rate and let a
+    # broken history go through this check unnoticed.
+    rates = tokentab.load_rates()
     today = datetime.now(timezone.utc).date()
 
     # The plans start when the data starts. Otherwise "All time" bills every

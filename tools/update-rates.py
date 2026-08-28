@@ -392,10 +392,13 @@ def self_check() -> int:
             else:
                 raise AssertionError(f"loaded a log it cannot price from: {broken}")
 
-        # price_rows walks the store a chunk at a time, in id order. Walking it
+        # price_rows walks the store a chunk at a time, in rowid order. Walking it
         # wrong loses rows quietly: a report is simply short, and nothing fails.
         # So: more rows than one chunk, and the count has to be every one of
-        # them, twice — once unpriced, once as a full reprice.
+        # them, twice — once unpriced, once as a full reprice. Two of them carry
+        # no id, because walking on `id` steps straight over those (`NULL > ''`
+        # is NULL, `'' > ''` is false) and leaves a store no report will add up
+        # and no command can fix.
         (Path(d) / "price_history.json").write_text(json.dumps({"history": {}}))
         con = sqlite3.connect(":memory:")
         con.row_factory = sqlite3.Row
@@ -406,6 +409,12 @@ def self_check() -> int:
             f"value_usd) VALUES ({','.join('?' * 18)})",
             [(f"e{i:05d}", f"{today}T00:00:00Z", today, "h", "s", "openai", "metered", "",
               "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for i in range(250)])
+        con.executemany(
+            "INSERT INTO events (id,ts,day,host,source,provider,billing,account,model,"
+            "project,repo,input,output,cache_read,cache_write,cache_write_1h,cash_usd,"
+            f"value_usd) VALUES ({','.join('?' * 18)})",
+            [(nid, f"{today}T00:00:00Z", today, "h", "s", "openai", "metered", "",
+              "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for nid in (None, "")])
         con.commit()
         loaded = tt.load_rates()
 
@@ -423,14 +432,14 @@ def self_check() -> int:
         else:
             raise AssertionError("added up a window holding rows that carry no Value")
 
-        assert tt.price_rows(con, loaded, chunk=100) == 250
+        assert tt.price_rows(con, loaded, chunk=100) == 252
         assert con.execute("SELECT COUNT(*) FROM events WHERE value_usd IS NULL").fetchone()[0] == 0
         assert tt.price_rows(con, loaded, chunk=100, apply=False) == 0
         assert tt.summarise(con, loaded, {}, window, blank)["headline"]["value_usd"] > 0
         loaded["models"]["gpt-x"]["input"] *= 2
-        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 250
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 252
         # …and a dry run leaves every one of them exactly as it found them.
-        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 250
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 252
 
     print("  self-check: all rules hold")
     return 0
@@ -449,13 +458,17 @@ def log_past(path: Path, outgoing: list, until: str) -> int:
     """Record what these models cost until `until`, so past days keep pricing at it.
 
     Overwriting a price in rates.json is the one thing here that reaches
-    backwards: Value is computed when a report is asked for, so without this log
-    a rate cut yesterday quietly re-prices every day since tokentab started.
+    backwards: an event already stored keeps the Value it was priced at, but a
+    backfill, a re-scan or a `reprice` prices a past day from this file, so
+    without the log a rate cut yesterday re-prices every day it reaches.
 
-    Append-only, and idempotent on the date: a model that already has a record
-    ending on this day keeps the one it has. That record is the price that was in
-    force for every day *before* today, and a second change today does not alter
-    a single one of them.
+    Append-only, and always at the end: each record's implied start is the
+    previous record's `until`, so a date earlier than one already logged does
+    not add a period, it silently re-dates every period above it — the days
+    that were priced at the older rate get the newer one and vice versa. A
+    model that already has a record ending on this day keeps the one it has,
+    for the same reason: that record prices every day *before* today, and a
+    second change today does not alter a single one of them.
     """
     try:
         doc = json.loads(path.read_text())
@@ -467,8 +480,14 @@ def log_past(path: Path, outgoing: list, until: str) -> int:
     written = 0
     for name, was in outgoing:
         recs = hist.setdefault(name, [])
-        if any(r.get("until") == until for r in recs):
+        newest = max((str(r.get("until", "")) for r in recs), default="")
+        if newest == until:
             continue
+        if newest > until:
+            raise SystemExit(f"{name}: price_history.json already ends a price on {newest}, "
+                             f"which is after {until}. The outgoing price is always the "
+                             f"newest one — logging an earlier date would re-date every "
+                             f"period after it. rates.json left unchanged.")
         recs.append({"until": until, **was})
         recs.sort(key=lambda r: r["until"])
         written += 1
@@ -500,6 +519,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.self_check:
         return self_check()
+
+    # Checked here, not where it is used: down there it is only reached when this
+    # run happens to find drift, so a scheduled job with a typo in the date would
+    # pass every quiet week and fail on the one day it had a price to log.
+    if args.as_of:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.as_of) or not iso_date(args.as_of):
+            raise SystemExit(f"--as-of wants a YYYY-MM-DD date, not {args.as_of!r}")
+        # A price cannot stop applying tomorrow: `until` is the day the new rate
+        # takes over, so a future one prices days that have not happened at a rate
+        # nobody has charged, and `tokentab verify` fails on it afterwards.
+        if args.as_of > today:
+            raise SystemExit(f"--as-of {args.as_of} is in the future — a price can only have "
+                             f"stopped applying on a day that has happened.")
 
     src = Path(args.source)
     try:
@@ -647,15 +680,7 @@ def main(argv: list[str] | None = None) -> int:
     # keep, and neither does a change that moved no number (a dropped flag).
     moved = [(n, own["models"][n]) for n, rate in changes if n in own["models"]
              and any(abs(own["models"][n].get(f, -1) - rate.get(f, -1)) > 1e-9 for f in FIELDS)]
-    effective = args.as_of or today
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", effective) or not iso_date(effective):
-        raise SystemExit(f"--as-of wants a YYYY-MM-DD date, not {effective!r}")
-    # A price cannot stop applying tomorrow: `until` is the day the new rate
-    # takes over, so a future one prices days that have not happened at a rate
-    # nobody has charged, and `tokentab verify` fails on it afterwards.
-    if effective > today:
-        raise SystemExit(f"--as-of {effective} is in the future — a price can only have "
-                         f"stopped applying on a day that has happened.")
+    effective = args.as_of or today  # validated in main, before anything is fetched
     logged = log_past(path.with_name("price_history.json"), moved, effective)
 
     try:

@@ -95,13 +95,24 @@ fi
 # rates.json is repo-owned (published list prices), so the repo wins on upgrade.
 # price_history.json goes with it, always: it says what those prices used to be,
 # so a copy older than its rates.json would miss records and silently re-price
-# past days at today's rate. Absent upstream is fine — no price has moved yet.
-cp "$SRC/rates.json" "$CFG/rates.json"
-say "rates     $CFG/rates.json"
+# past days at today's rate.
+#
+# The log goes first, for the same reason tools/update-rates.py writes it first:
+# an interrupt between the two must not leave new prices beside a log that has
+# not learned the old ones. History-then-rates leaves the store priced exactly
+# as it was; the other order re-prices every past day at today's rate.
+#
+# Absent upstream is not "keep what is there" — a repo with no log is a repo
+# where no price has moved, and a stale copy would price past days at rates
+# nothing here still publishes. It is removed.
 if [ -f "$SRC/price_history.json" ]; then
   cp "$SRC/price_history.json" "$CFG/price_history.json"
   say "history   $CFG/price_history.json"
+else
+  rm -f "$CFG/price_history.json"
 fi
+cp "$SRC/rates.json" "$CFG/rates.json"
+say "rates     $CFG/rates.json"
 
 # plans.json names the real accounts. It is gitignored, it is the one file here
 # a human edits, and it is not recoverable from the repo — so it is written once
@@ -269,15 +280,22 @@ printf '\ntokentab %s installed.\n' "$VERSION"
 # status line refuse to add up a period holding one — correctly, rather than
 # answering $0.00 — so the upgrade has one manual step, and this is the only
 # place that would otherwise not mention it.
-if [ -f "$LIB/tokentab.db" ] && python3 -c '
-import sqlite3, sys
-con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+DB="${TOKENTAB_DB:-$LIB/tokentab.db}"
+if [ -f "$DB" ] && python3 -c '
+import pathlib, sqlite3, sys
+# as_uri, not concatenation: a "#" in the path truncates the URI and drops
+# mode=ro, and a read-only probe that writes is not one.
+uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"
 try:
+    con = sqlite3.connect(uri, uri=True, timeout=2)
     unpriced = con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone()
-except sqlite3.OperationalError:
-    unpriced = True  # older than the column: every row in it needs pricing
+except sqlite3.DatabaseError as e:
+    # No such column means a store older than the migration: every row needs
+    # pricing. Anything else — locked, corrupt, not a store — is not something
+    # to advise a reprice about, so say nothing.
+    unpriced = "no such column" in str(e)
 sys.exit(0 if unpriced else 1)
-' "$LIB/tokentab.db"; then
+' "$DB"; then
   cat <<EOF
 
   ACTION NEEDED: events already in the store carry no Value yet, and no report
