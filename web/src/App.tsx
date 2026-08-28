@@ -162,14 +162,6 @@ export default function App() {
             </Alert>
           )}
 
-          {/* Outside the summary branch on purpose: when /api/summary fails, the
-              panel saying which machine went quiet is the one worth keeping. */}
-          {fleet.length > 0 && (
-            <Panel title="Machines">
-              <MachinesCard rows={fleet} />
-            </Panel>
-          )}
-
           {/* Skeletons say "on its way". A failed fetch is not on its way, and four
               cards shimmering forever under the sentence explaining why there are
               no numbers reads as one still loading. */}
@@ -222,6 +214,15 @@ export default function App() {
               </div>
             </>
           ) : null}
+
+          {/* Below the numbers, and outside the branch above on purpose: the money
+              leads the page, but when /api/summary fails the panel saying which
+              machine went quiet is the one worth keeping on screen. */}
+          {fleet.length > 0 && (
+            <Panel title="Machines">
+              <MachinesCard rows={fleet} />
+            </Panel>
+          )}
 
           <p className="pb-4 text-xs text-muted-foreground">
             Flat-plan figures per project are allocated by token share, never measured. Value prices

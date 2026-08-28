@@ -116,6 +116,15 @@ server  ─ systemd --user tokentab-collect.timer  ────────┘  
                                                             tokentab-serve ─► :8899
 ```
 
+Every push ends with a heartbeat, so the store hears from a machine even when it
+had nothing to send. The dashboard's **Machines** panel is that: green if the
+machine checked in within the last three hours, red if it did not, grey if it is
+running a build older than heartbeats. Red means *not reporting* — asleep, shut
+down and broken all look the same from the server, and the panel says so rather
+than guessing.
+
+![The Machines panel: atoll grey with "seen never", foundry red at 9h, nimbus green at 1m](docs/machines.png)
+
 Each host scans only its own transcripts and pushes NDJSON over SSH. Events carry
 a content hash as primary key, so re-pushing is idempotent and a full re-backfill
 is always safe.
