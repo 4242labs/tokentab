@@ -171,6 +171,7 @@ tokentab backfill             # scan everything on disk, ignoring saved offsets
 tokentab push --server <host>
 tokentab ingest               # NDJSON on stdin -> SQLite
 tokentab adopt [--apply]      # stamp accounts onto pre-account events (dry run by default)
+tokentab reprice [--all] [--apply]   # rewrite stored Values from the current rates
 tokentab serve --bind <addr> --port 8899
 tokentab report --preset cycle [--project foo] [--provider anthropic] … [--json]
 tokentab statusline           # one line of current spend, for a prompt or status bar
@@ -205,9 +206,22 @@ WAL mode, which sqlite requires to read one at all. tokentab never turns WAL on;
 if you have, note that a WAL store in a read-only directory cannot be read.)
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
-plan fees over a whole cycle, re-prices three models by hand against the list rates
-of a fixed day, and checks that every past price in `price_history.json` is unique,
+plan fees over a whole cycle, that every stored Value still matches what the rates
+say it should be, re-prices three models by hand against the list rates of a fixed
+day, and checks that every past price in `price_history.json` is uniquely dated,
 priceable, and still belongs to a model `rates.json` prices today.
+
+### What a past report is worth
+
+Value is written onto each event when it lands, at the list rate of the day the
+usage happened, and nothing that comes later can move it. That is how money is
+normally recorded: the amount is on the record, and the price list is kept
+separately so a period can be re-run when a price turns out to have been wrong.
+
+`rates.json` is today's price list, `price_history.json` is what those prices
+used to be, and `tokentab reprice --all --apply` is the one deliberate way a
+stored number changes. `tokentab verify` fails when the two disagree, so a rate
+edited by hand is reported rather than quietly ignored.
 
 ## Configuration
 

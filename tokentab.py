@@ -90,7 +90,11 @@ CREATE TABLE IF NOT EXISTS events (
   cache_read     INTEGER NOT NULL DEFAULT 0,
   cache_write    INTEGER NOT NULL DEFAULT 0,
   cache_write_1h INTEGER NOT NULL DEFAULT 0,
-  cash_usd       REAL NOT NULL DEFAULT 0  -- metered only; flat/local are always 0
+  cash_usd       REAL NOT NULL DEFAULT 0,  -- metered only; flat/local are always 0
+  -- What this usage was worth at the list price of the day it happened, written
+  -- once when the event lands. A price a vendor changes later cannot reach it.
+  -- NULL means not yet priced; `connect` fills those in, `reprice` redoes them.
+  value_usd      REAL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_day     ON events(day);
@@ -107,7 +111,8 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
 # Columns added after the first release. Applied to any store already on disk —
 # sqlite has no "add column if not exists".
-MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),)
+MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),
+              ("value_usd", "ALTER TABLE events ADD COLUMN value_usd REAL"))
 
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -580,14 +585,44 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
                 con.execute(ddl)
         con.commit()
     con.executescript(SCHEMA)
+    # A row with no Value is a row no report can add up, and the migration that
+    # adds the column leaves every existing row that way. Pricing them is part of
+    # bringing the store up to date, not a separate errand — and they price at
+    # the rate of their own day, so this changes no number that was right.
+    if con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone():
+        price_rows(con, load_rates())
     return con
+
+
+def price_rows(con, rates: dict, *, everything: bool = False, apply: bool = True) -> int:
+    """Write each row's Value at the list price of its own day. Returns rows changed.
+
+    This is the number every report adds up. Computing it at query time instead
+    meant a vendor moving a price silently rewrote history — so it is written
+    once, when the event lands, and only ever rewritten deliberately: by
+    `reprice --all`, when a rate turns out to have been wrong.
+    """
+    where = "" if everything else " WHERE value_usd IS NULL"
+    # Only the rows whose number actually moves, so a `--all` that changes
+    # nothing writes nothing. The cursor is drained before the update runs.
+    changed = []
+    for r in con.execute(f"SELECT id, day, model, provider, input, output, cache_read, "
+                         f"cache_write, cache_write_1h, value_usd FROM events{where}"):
+        v = value_of(r, rates)
+        if r["value_usd"] is None or abs(r["value_usd"] - v) > 1e-12:
+            changed.append((v, r["id"]))
+    if changed and apply:
+        con.executemany("UPDATE events SET value_usd = ? WHERE id = ?", changed)
+        con.commit()
+    return len(changed)
 
 
 def cmd_ingest(args) -> int:
     con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+    rates = load_rates()
     cols = (
         "id ts day host source provider billing plan account model project repo session "
-        "input output cache_read cache_write cache_write_1h cash_usd"
+        "input output cache_read cache_write cache_write_1h cash_usd value_usd"
     ).split()
     # Re-sending an event is a no-op except for one case: an event stored before
     # accounts existed gets its account filled in. Nothing else is ever rewritten.
@@ -606,6 +641,11 @@ def cmd_ingest(args) -> int:
             continue
         ev["day"] = ev["ts"][:10]
         ev["account"] = ev.get("account") or ""  # events from a pre-account collector
+        # Priced here, once, at the list rate of the day it happened. A collector
+        # need not send every token field, so the row is normalised first.
+        ev["value_usd"] = value_of({"model": ev["model"], "provider": ev.get("provider"),
+                                    "day": ev["day"],
+                                    **{c: ev.get(c) or 0 for c in TOKEN_COLS}}, rates)
         batch.append([ev.get(c) for c in cols])
         seen += 1
         if len(batch) >= 5000:
@@ -621,6 +661,26 @@ def cmd_ingest(args) -> int:
     con.commit()
     print(f"tokentab ingest: {seen} received, {new} written (new or account backfilled), "
           f"{seen - new} unchanged", file=sys.stderr)
+    return 0
+
+
+def cmd_reprice(args) -> int:
+    """Rewrite stored Values from the current rates and price history.
+
+    The one deliberate way a past number moves. Value is written when an event
+    lands and nothing else touches it, so a rate that was wrong when it was
+    written stays wrong until this is run — which is the whole point: a
+    correction has to be asked for, not arrive with a price change.
+    """
+    con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+    n = price_rows(con, load_rates(), everything=args.all, apply=args.apply)
+    scope = "every row" if args.all else "the rows carrying no Value"
+    if not n:
+        print(f"reprice: {scope} already priced as the rates say. Nothing to do.")
+    elif args.apply:
+        print(f"reprice: {n:,} row(s) rewritten from {scope}.")
+    else:
+        print(f"reprice: {n:,} row(s) of {scope} would change — re-run with --apply.")
     return 0
 
 
@@ -895,19 +955,16 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
     args = args + [frm, to]
 
     def agg(group: str | None):
-        # provider always rides along: it decides which fallback rate an unknown
-        # (local) model is priced at, and `day` decides which of that model's past
-        # prices was in force. Always, even with an empty log: grouping by day
-        # only when it can change a number would leave the shape every report
-        # takes the day a vendor first moves a price with no coverage until then,
-        # and `daily` and the status line pay for it on every report regardless.
-        keys = [k for k in (group, "model", "provider", "day") if k]
-        keys = list(dict.fromkeys(keys))
-        cols = ", ".join(keys)
-        q = (f"SELECT {cols}, SUM(input) input, SUM(output) output, "
+        # Value is stored on the row, priced at the list rate of the day the
+        # usage happened. So a breakdown adds it up and nothing more — no model
+        # and no provider have to ride along to look a rate up any more, and no
+        # later price change can reach these numbers.
+        sel = f"{group}, " if group else ""
+        by = f" GROUP BY {group}" if group else ""
+        q = (f"SELECT {sel}SUM(value_usd) value, SUM(input) input, SUM(output) output, "
              f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
              f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n "
-             f"FROM events WHERE {where} GROUP BY {cols}")
+             f"FROM events WHERE {where}{by}")
         return con.execute(q, args).fetchall()
 
     def rollup(group: str) -> list[dict]:
@@ -915,7 +972,7 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         for r in agg(group):
             k = r[group] or "—"
             a = acc.setdefault(k, {"key": k, "value": 0.0, "cash": 0.0, "tokens": 0, "events": 0})
-            a["value"] += value_of(r, rates)
+            a["value"] += r["value"] or 0.0
             a["cash"] += r["cash"] or 0.0
             a["tokens"] += sum(r[c] for c in TOKEN_COLS)
             a["events"] += r["n"]
@@ -923,7 +980,10 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
 
     total = {"value": 0.0, "cash_metered": 0.0, "tokens": 0, "events": 0}
     for r in agg(None):
-        total["value"] += value_of(r, rates)
+        # An ungrouped SUM over no rows is one row of NULLs, not no rows at all.
+        if not r["n"]:
+            continue
+        total["value"] += r["value"] or 0.0
         total["cash_metered"] += r["cash"] or 0.0
         total["tokens"] += sum(r[c] for c in TOKEN_COLS)
         total["events"] += r["n"]
@@ -1018,23 +1078,18 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         "breakdown": {g: rollup(FILTER_COLS[g]) for g in
                       ("project", "provider", "model", "machine", "billing", "repo", "source",
                        "account")},
-        "daily": daily(con, rates, where, args),
+        "daily": daily(con, where, args),
         "notes": notes,
     }
 
 
-def daily(con, rates, where, args) -> list[dict]:
-    q = (f"SELECT day, model, provider, SUM(input) input, SUM(output) output, "
+def daily(con, where, args) -> list[dict]:
+    q = (f"SELECT day, SUM(value_usd) value, SUM(input) input, SUM(output) output, "
          f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-         f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n "
-         f"FROM events WHERE {where} GROUP BY day, model, provider ORDER BY day")
-    acc: dict[str, dict] = {}
-    for r in con.execute(q, args):
-        a = acc.setdefault(r["day"], {"day": r["day"], "value": 0.0, "tokens": 0})
-        a["value"] += value_of(r, rates)
-        a["tokens"] += sum(r[c] for c in TOKEN_COLS)
-    return [{"day": k, "value": round(v["value"], 4), "tokens": v["tokens"]}
-            for k, v in sorted(acc.items())]
+         f"SUM(cache_write_1h) cache_write_1h FROM events WHERE {where} "
+         f"GROUP BY day ORDER BY day")
+    return [{"day": r["day"], "value": round(r["value"] or 0.0, 4),
+             "tokens": sum(r[c] for c in TOKEN_COLS)} for r in con.execute(q, args)]
 
 
 def distinct_values(con) -> dict:
@@ -1206,13 +1261,11 @@ def statusline_numbers(con, rates: dict, plans: dict) -> dict:
     today = datetime.now(timezone.utc).date().isoformat()
     out = {"today": 0.0, "value": 0.0, "cash": 0.0}
     for r in con.execute(
-        "SELECT day, model, provider, SUM(input) input, SUM(output) output, "
-        "SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-        "SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash "
-        "FROM events WHERE day >= ? AND day < ? GROUP BY day, model, provider",
+        "SELECT day, SUM(value_usd) value, SUM(cash_usd) cash "
+        "FROM events WHERE day >= ? AND day < ? GROUP BY day",
         (frm.isoformat(), to.isoformat()),
     ):
-        v = value_of(r, rates)
+        v = r["value"] or 0.0
         out["value"] += v
         out["cash"] += r["cash"] or 0.0
         if r["day"] == today:
@@ -1318,6 +1371,23 @@ def cmd_verify(args) -> int:
         flag = "PASS" if abs(got - want) < 1e-6 else "FAIL"
         ok &= flag == "PASS"
         print(f"  {model:<18} expected ${want:>7,.2f}   got ${got:>7,.2f}   {flag}")
+
+    # 2a. The stored Values are the ledger; rates.json and the log are the book
+    #     they were written from. They agree until someone corrects a rate, and
+    #     then they must be made to agree again on purpose rather than quietly.
+    print("\nstored Values agree with the rates they were priced from")
+    unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
+    stale = price_rows(con, rates, everything=True, apply=False)
+    total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
+    print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value today's rates give them")
+    if unpriced:
+        print(f"  ! {unpriced:,} row(s) carry no Value at all")
+    if stale:
+        print(f"  ! {stale:,} row(s) would price differently now — a rate changed after they "
+              f"were written. Deliberate: run `tokentab reprice --all --apply`. Not "
+              f"deliberate: the rate that moved is the one to look at.")
+    ok &= not stale
+    print(f"  {'FAIL' if stale else 'PASS'}")
 
     # 2b. Dated prices: every day must resolve to exactly one rate. Falling
     #     through to the current price makes that true for any day later than the
@@ -1474,6 +1544,14 @@ def main(argv=None) -> int:
     s = sub.add_parser("statusline", help="one line of this cycle's spend, for a prompt or status bar")
     s.add_argument("--db")
     s.set_defaults(func=cmd_statusline)
+
+    s = sub.add_parser("reprice", help="rewrite stored Values from the current rates")
+    s.add_argument("--all", action="store_true",
+                   help="every row, not only the ones carrying no Value — use after correcting "
+                        "a rate that was wrong when the usage was priced")
+    s.add_argument("--apply", action="store_true", help="write it (dry run by default)")
+    s.add_argument("--db")
+    s.set_defaults(func=cmd_reprice)
 
     s = sub.add_parser("verify", help="acceptance checks")
     s.add_argument("--db")

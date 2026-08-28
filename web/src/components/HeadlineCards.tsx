@@ -85,7 +85,7 @@ export function HeadlineCards({ h }: { h: Headline }) {
         value={usd(h.value_usd)}
         color={VALUE}
         foot="same usage at published list rates"
-        help="What this usage would have cost on metered API pricing, including local-model traffic. Priced at list rates. When a vendor moves a price the outgoing one is kept, so past days keep the numbers they had."
+        help="What this usage would have cost on metered API pricing, including local-model traffic. Each event is priced at the list rate of the day it happened, and that number is kept. A later price change cannot move it."
       />
       <Figure
         label="Tokens"
