@@ -932,7 +932,7 @@ def resolve_model(model: str, rates: dict, models=None) -> str | None:
     # The longest prefix decides, and then the boundary accepts or rejects it —
     # in that order, not filtered inside the search. A dated build
     # (`claude-opus-4-5-20251101`) is the same model as `claude-opus-4-5`; a
-    # `gpt-52` is not a `gpt-5`. Reject and search on and `gpt-5.11` lands on
+    # `gpt-52` is not a `gpt-5`. Reject and search on, and `gpt-5.11` lands on
     # `gpt-5` — a shorter name that ends at a separator by luck, and is still
     # some other model. No name at all is the honest answer: it prices at the
     # fallback and `verify` says so out loud.
