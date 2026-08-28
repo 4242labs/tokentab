@@ -163,7 +163,8 @@ def load_rates() -> dict:
     # append-only log. Absent is normal — no price has moved yet, and then every
     # day prices at the current rate, exactly as before.
     try:
-        past = load_json("price_history.json").get("history", {})
+        doc = load_json("price_history.json")
+        past = doc.get("history", {}) if isinstance(doc, dict) else doc
     except FileNotFoundError:
         past = {}
     except (OSError, ValueError) as exc:
@@ -176,8 +177,8 @@ def load_rates() -> dict:
     # invited to edit. The date is compared as a string, so a date that is not
     # one — or one carrying a time — silently moves the boundary.
     if not isinstance(past, dict):
-        raise SystemExit(f"tokentab: price_history.json — `history` is a "
-                         f"{type(past).__name__}, not an object of model → past prices")
+        raise SystemExit(f"tokentab: price_history.json — expected an object of model → past "
+                         f"prices under `history`, found a {type(past).__name__}")
     for model, recs in past.items():
         if not isinstance(recs, list):
             raise SystemExit(f"tokentab: price_history.json — {model} is not a list of prices")
@@ -603,7 +604,7 @@ def busy(exc: Exception) -> bool:
         "locked" in str(exc) or "busy" in str(exc))
 
 
-def probe(con, path=None) -> list:
+def probe(con, path) -> list:
     """The first read of any connection, and the one that meets a held lock.
 
     `reprice` takes the write lock for as long as it takes to rewrite the table
@@ -622,11 +623,13 @@ def probe(con, path=None) -> list:
     except sqlite3.DatabaseError as exc:
         # A file that is not a database, or one a killed write left truncated,
         # fails on the first statement to read a page — which is this one, for
-        # every command. Same reasoning as the lock above: the traceback reads as
-        # a tokentab bug, and it is a broken file.
-        raise SystemExit(f"tokentab: {path or 'the store'} is not readable as a tokentab "
-                         f"store ({exc}) — restore it from a copy, or move it aside and "
-                         f"rebuild with `tokentab scan`.")
+        # every command that opens the store. Same reasoning as the lock above:
+        # the traceback reads as a tokentab bug, and it is a broken file. Broad
+        # on purpose and safe only because this runs one PRAGMA and nothing else:
+        # a second statement here would need its own faults told apart.
+        raise SystemExit(f"tokentab: {path} is not readable as a tokentab store ({exc}) — "
+                         f"restore it from a copy, or move it aside and rebuild with "
+                         f"`tokentab backfill | tokentab ingest`.")
 
 
 def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -> sqlite3.Connection:
@@ -917,24 +920,24 @@ def resolve_model(model: str, rates: dict, models=None) -> str | None:
     """
     models = rates["models"] if models is None else models
     m = rates.get("aliases", {}).get(model, model)
-    # A free model has no entry in the table and never will: `rate_for` zeroes it
-    # before it ever gets here. Anything else would hand back some other model's
-    # name to the callers that do not run that short-circuit first — and they use
-    # the name to look up a price history.
+    # Free first, and None rather than a name: `rate_for` zeroes these before it
+    # ever gets here, so whatever this returned went only to the callers that do
+    # not run that short-circuit — and they use the name to look up a price
+    # history. Listing a model in both tables is a rates.json mistake, and this
+    # reads free as the answer to it.
     if m in rates.get("free_models", []):
         return None
     if m in models:
         return m
-    # Longest prefix, but only one that ends at a separator: a dated build
-    # (`claude-opus-4-5-20251101`) is the same model as `claude-opus-4-5`, while
-    # a `gpt-52` would not be a `gpt-5`. Without the boundary the next model
-    # whose name extends an older one inherits its rate and its logged history.
-    best = None
-    for k in models:
-        if m.startswith(k) and not m[len(k):len(k) + 1].isalnum() \
-                and (best is None or len(k) > len(best)):
-            best = k
-    return best
+    # The longest prefix decides, and then the boundary accepts or rejects it —
+    # in that order, not filtered inside the search. A dated build
+    # (`claude-opus-4-5-20251101`) is the same model as `claude-opus-4-5`; a
+    # `gpt-52` is not a `gpt-5`. Reject and search on and `gpt-5.11` lands on
+    # `gpt-5` — a shorter name that ends at a separator by luck, and is still
+    # some other model. No name at all is the honest answer: it prices at the
+    # fallback and `verify` says so out loud.
+    best = max((k for k in models if m.startswith(k)), key=len, default=None)
+    return None if best is not None and m[len(best):len(best) + 1].isalnum() else best
 
 
 def rate_for(model: str, rates: dict, provider: str | None = None,
