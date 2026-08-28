@@ -219,9 +219,15 @@ normally recorded: the amount is on the record, and the price list is kept
 separately so a period can be re-run when a price turns out to have been wrong.
 
 `rates.json` is today's price list, `price_history.json` is what those prices
-used to be, and `tokentab reprice --apply` is the one deliberate way a
-stored number changes. `tokentab verify` fails when the two disagree, so a rate
-edited by hand is reported rather than quietly ignored.
+used to be, and `tokentab reprice --apply` is the one thing that changes a
+stored number. `tokentab verify` fails when the two disagree, so a rate edited
+by hand is reported rather than quietly ignored.
+
+Upgrading a store from before this carries one manual step: the events already
+in it have no Value yet, so `report` and the dashboard refuse to add them up
+and say so, and `tokentab reprice --apply` fills them in — each at the rate of
+its own day. It is a rewrite of the whole table, all of it or none of it, and
+it holds the store while it runs; a minute or so per million events.
 
 ## Configuration
 

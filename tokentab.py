@@ -106,10 +106,6 @@ CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
 -- The pages go on the freelist, so the file stops growing rather than shrinking.
 DROP INDEX IF EXISTS ix_events_plan;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
--- Every read checks for rows carrying no Value before it adds Values up, and
--- on a healthy store that question has to be free. Partial, so it holds nothing
--- at all once the last row is priced.
-CREATE INDEX IF NOT EXISTS ix_events_unpriced ON events(id) WHERE value_usd IS NULL;
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -577,14 +573,6 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
         if stale:
             raise RuntimeError(f"store predates this build (no {', '.join(stale)}); "
                                f"any command that writes will migrate it")
-        # The column can be there and still be empty — that is what the store
-        # looks like between the migration and the backfill, and what it is left
-        # as if the migrating command is killed. Reports add that column up, so
-        # reading it then would answer $0.00 with a straight face and keep doing
-        # it forever. Refusing is the whole point: a reader cannot fix it.
-        if con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone():
-            raise RuntimeError("store has rows carrying no Value — it was migrated but not "
-                               "priced; run `tokentab reprice --apply` to finish it")
         return con
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=timeout)
@@ -597,20 +585,15 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
                 con.execute(ddl)
         con.commit()
     con.executescript(SCHEMA)
-    # A row with no Value is a row no report can add up, and the migration that
-    # adds the column leaves every existing row that way. Pricing them is part of
-    # bringing the store up to date, not a separate errand — and they price at
-    # the rate of their own day, so this changes no number that was right.
-    if con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone():
-        n = price_rows(con, load_rates(), unpriced_only=True)
-        # Said out loud: it is the one place a stored number moves without being
-        # asked for, and on a large store it is also why this command paused.
-        print(f"tokentab: priced {n:,} row(s) that carried no Value", file=sys.stderr)
+    # No pricing here. Adding the column is migration and takes no time; filling
+    # a million rows in is work, and doing it inside `connect` meant every
+    # command that happened to open the store started its own copy of it, fought
+    # the others for the write lock, and killed whichever of them was an
+    # `ingest`. `reprice` does it, once, because it was asked to.
     return con
 
 
-def price_rows(con, rates: dict, *, unpriced_only: bool = False, apply: bool = True,
-               chunk: int = 20_000) -> int:
+def price_rows(con, rates: dict, *, apply: bool = True, chunk: int = 20_000) -> int:
     """Write each row's Value at the list price of its own day. Returns rows changed.
 
     This is the number every report adds up. Computing it at query time instead
@@ -618,20 +601,18 @@ def price_rows(con, rates: dict, *, unpriced_only: bool = False, apply: bool = T
     once, when the event lands, and only ever rewritten deliberately, by
     `reprice`, when a rate turns out to have been wrong.
 
-    A chunk at a time, walking the id order, for two reasons: a million rows
-    read whole is a quarter of a gigabyte, and one commit for all of them holds
-    the write lock for the whole job. sqlite has no shared writers, so a status
-    line or a cron push landing during a backfill would simply die. Committing
-    per chunk hands the lock back constantly instead.
+    Read a chunk at a time — a million rows read whole is a quarter of a
+    gigabyte — but written in one transaction, because a repricing interrupted
+    half way leaves a total that is true of no rate table at all, and no reader
+    can tell. Every row or none.
     """
-    where = " AND value_usd IS NULL" if unpriced_only else ""
-    q = (f"SELECT id, day, model, provider, input, output, cache_read, cache_write, "
-         f"cache_write_1h, value_usd FROM events WHERE id > ?{where} ORDER BY id LIMIT ?")
+    q = ("SELECT id, day, model, provider, input, output, cache_read, cache_write, "
+         "cache_write_1h, value_usd FROM events WHERE id > ? ORDER BY id LIMIT ?")
     last, total = "", 0
     while True:
         rows = con.execute(q, (last, chunk)).fetchall()
         if not rows:
-            return total
+            break
         last = rows[-1]["id"]
         # Only the rows whose number actually moves, so a reprice that changes
         # nothing writes nothing. The cursor is drained before the update runs.
@@ -640,11 +621,19 @@ def price_rows(con, rates: dict, *, unpriced_only: bool = False, apply: bool = T
         total += len(changed)
         if changed and apply:
             con.executemany("UPDATE events SET value_usd = ? WHERE id = ?", changed)
-            con.commit()
+    if apply:
+        con.commit()
+    return total
 
 
 def cmd_ingest(args) -> int:
-    con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
+    # Waits, where every other command gives up after five seconds. `scan` saves
+    # its offsets whether or not the `ingest` it is piped into survived, so an
+    # ingest that dies on a busy store does not just fail — it drops those events
+    # out of the incremental window for good. A `reprice` on a large store holds
+    # the write lock for a minute or two, and a cron push has nothing better to
+    # do than wait for it.
+    con = connect(Path(args.db).expanduser() if args.db else DB_PATH, timeout=300.0)
     rates = load_rates()
     cols = (
         "id ts day host source provider billing plan account model project repo session "
@@ -699,15 +688,24 @@ def cmd_reprice(args) -> int:
     correction has to be asked for, not arrive with a price change.
     """
     con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
-    # Every row, always. A scope of "only the ones carrying no Value" would be
-    # empty by the time it ran: opening the store for writing fills those in.
-    n = price_rows(con, load_rates(), apply=args.apply)
+    try:
+        # Every row, in one transaction. On a large store that holds the write
+        # lock for a while, which is why it is a command someone runs and not
+        # something that happens to them: a `push` landing in the middle of it
+        # is a `push` that fails, and `scan` has already moved its offsets on.
+        n = price_rows(con, load_rates(), apply=args.apply)
+    except sqlite3.OperationalError as exc:
+        raise SystemExit(f"reprice: {exc} — something else is writing to the store. "
+                         f"Nothing was changed; try again when it is idle.")
     if not n:
         print("reprice: every row already priced as the rates say. Nothing to do.")
     elif args.apply:
         print(f"reprice: {n:,} row(s) rewritten.")
     else:
+        # Exit 1, so a script can ask "is the store in step with the rates?"
+        # without parsing this line. Same answer `verify` gives, cheaper.
         print(f"reprice: {n:,} row(s) would change — re-run with --apply.")
+        return 1
     return 0
 
 
@@ -990,8 +988,8 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         by = f" GROUP BY {group}" if group else ""
         q = (f"SELECT {sel}SUM(value_usd) value, SUM(input) input, SUM(output) output, "
              f"SUM(cache_read) cache_read, SUM(cache_write) cache_write, "
-             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n "
-             f"FROM events WHERE {where}{by}")
+             f"SUM(cache_write_1h) cache_write_1h, SUM(cash_usd) cash, COUNT(*) n, "
+             f"SUM(value_usd IS NULL) blank FROM events WHERE {where}{by}")
         return con.execute(q, args).fetchall()
 
     def rollup(group: str) -> list[dict]:
@@ -1010,6 +1008,14 @@ def summarise(con, rates: dict, plans: dict, period: dict, filters: dict) -> dic
         # An ungrouped SUM over no rows is one row of NULLs, not no rows at all.
         if not r["n"]:
             continue
+        # A row carrying no Value adds nothing to a SUM, so a store migrated but
+        # not yet priced would answer $0.00 and never say why. Asked of the same
+        # window that was just added up, so it costs nothing and cannot be wrong
+        # about rows outside it.
+        if r["blank"]:
+            raise SystemExit(f"tokentab: {r['blank']:,} of {r['n']:,} events in this period "
+                             f"carry no Value — the store was migrated but not priced. "
+                             f"Run `tokentab reprice --apply`.")
         total["value"] += r["value"] or 0.0
         total["cash_metered"] += r["cash"] or 0.0
         total["tokens"] += sum(r[c] for c in TOKEN_COLS)
@@ -1196,7 +1202,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path.startswith("/api/"):
                 return self._send(404, b'{"error":"no such endpoint"}', "application/json")
             self._send_asset(u.path)
-        except Exception as e:  # keep the dashboard up, surface the error
+        # SystemExit is not an Exception, and `summarise` raises one at a store
+        # that was migrated but never priced. Uncaught it kills the thread with
+        # no reply at all, so the dashboard would hang rather than say why.
+        except (Exception, SystemExit) as e:  # keep the dashboard up, surface the error
             self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
 
     def log_message(self, *a):  # quiet
@@ -1288,10 +1297,16 @@ def statusline_numbers(con, plans: dict) -> dict:
     today = datetime.now(timezone.utc).date().isoformat()
     out = {"today": 0.0, "value": 0.0, "cash": 0.0}
     for r in con.execute(
-        "SELECT day, SUM(value_usd) value, SUM(cash_usd) cash "
+        "SELECT day, SUM(value_usd) value, SUM(cash_usd) cash, SUM(value_usd IS NULL) blank "
         "FROM events WHERE day >= ? AND day < ? GROUP BY day",
         (frm.isoformat(), to.isoformat()),
     ):
+        # A store migrated but not priced would render $0.00 into someone's
+        # prompt on every keystroke, and a reader cannot fix it. Saying nothing
+        # is the honest answer; TOKENTAB_DEBUG says why.
+        if r["blank"]:
+            raise RuntimeError(f"{r['blank']:,} events on {r['day']} carry no Value — "
+                               f"run `tokentab reprice --apply`")
         v = r["value"] or 0.0
         out["value"] += v
         out["cash"] += r["cash"] or 0.0
@@ -1342,6 +1357,15 @@ def cmd_verify(args) -> int:
     con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
     rates, plans = load_rates(), load_plans()
     ok = True
+
+    # First, because every check below asks for a report and a report of a
+    # period holding an unpriced row refuses to answer. Told here rather than
+    # hit as a stack trace out of the first check.
+    unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
+    if unpriced:
+        print(f"! {unpriced:,} row(s) carry no Value — the store was migrated but never "
+              f"priced, and no report will add up until `tokentab reprice --apply` has run.")
+        return 1
 
     # 1. Conservation: over a whole billing cycle, per-project allocations must
     #    sum back to the plan fee (to the cent).
@@ -1403,8 +1427,8 @@ def cmd_verify(args) -> int:
     #     they were written from. They agree until someone corrects a rate, and
     #     then they must be made to agree again on purpose rather than quietly.
     print("\nstored Values agree with the rates they were priced from")
-    # No count of rows carrying no Value: opening the store for writing, which
-    # this did, has already filled every one of them in.
+    # Rows carrying no Value are not counted here — nothing gets this far with
+    # one; the check at the top of this command has already said so and stopped.
     stale = price_rows(con, rates, apply=False)
     total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
     print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value today's rates give them")

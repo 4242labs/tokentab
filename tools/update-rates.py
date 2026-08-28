@@ -51,7 +51,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -392,11 +392,10 @@ def self_check() -> int:
             else:
                 raise AssertionError(f"loaded a log it cannot price from: {broken}")
 
-        # price_rows walks the store a chunk at a time, in id order, so a large
-        # store neither reads whole nor holds the write lock for the whole job.
-        # Walking it wrong loses rows quietly: a report is simply short, and
-        # nothing fails. So: more rows than one chunk, and the count has to be
-        # every one of them, twice — once unpriced, once as a full reprice.
+        # price_rows walks the store a chunk at a time, in id order. Walking it
+        # wrong loses rows quietly: a report is simply short, and nothing fails.
+        # So: more rows than one chunk, and the count has to be every one of
+        # them, twice — once unpriced, once as a full reprice.
         (Path(d) / "price_history.json").write_text(json.dumps({"history": {}}))
         con = sqlite3.connect(":memory:")
         con.row_factory = sqlite3.Row
@@ -409,10 +408,28 @@ def self_check() -> int:
               "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for i in range(250)])
         con.commit()
         loaded = tt.load_rates()
-        assert tt.price_rows(con, loaded, unpriced_only=True, chunk=100) == 250
+
+        # A row carrying no Value adds nothing to a SUM, so a store migrated but
+        # never priced would report $0.00 rather than fail. That silence is the
+        # thing this whole change exists to remove: every report of a window
+        # holding one has to refuse.
+        window = {"preset": "all", "from": None, "to": None,
+                  "_from": date(2000, 1, 1), "_to": date(2999, 1, 1)}
+        blank = {k: None for k in tt.FILTER_COLS}
+        try:
+            tt.summarise(con, loaded, {}, window, blank)
+        except SystemExit as e:
+            assert "reprice" in str(e), e
+        else:
+            raise AssertionError("added up a window holding rows that carry no Value")
+
+        assert tt.price_rows(con, loaded, chunk=100) == 250
         assert con.execute("SELECT COUNT(*) FROM events WHERE value_usd IS NULL").fetchone()[0] == 0
         assert tt.price_rows(con, loaded, chunk=100, apply=False) == 0
+        assert tt.summarise(con, loaded, {}, window, blank)["headline"]["value_usd"] > 0
         loaded["models"]["gpt-x"]["input"] *= 2
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 250
+        # …and a dry run leaves every one of them exactly as it found them.
         assert tt.price_rows(con, loaded, chunk=100, apply=False) == 250
 
     print("  self-check: all rules hold")
