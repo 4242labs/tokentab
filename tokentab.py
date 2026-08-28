@@ -126,9 +126,11 @@ MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL D
               ("value_usd", "ALTER TABLE events ADD COLUMN value_usd REAL"))
 
 # The collector runs hourly, with up to two minutes of jitter (install.sh:
-# OnUnitActiveSec=1h, RandomizedDelaySec=120). Three hours clears two missed
-# runs, so a tailnet that blinks once — which happens, and recovers by itself —
-# does not paint the machine silent.
+# OnCalendar=hourly + RandomizedDelaySec=120 on Linux, StartInterval=3600 on
+# macOS). Three hours clears one missed run with an hour to spare, so a tailnet
+# that blinks once — which happens, and recovers by itself — does not paint the
+# machine silent. Two missed runs land within a couple of minutes of the line
+# and are a coin flip; three or more always read silent.
 HOST_LATE_HOURS = 3
 
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
@@ -811,8 +813,10 @@ def cmd_ingest(args) -> int:
             # clock, never the sender's — a machine whose clock runs ahead would
             # otherwise report healthy for as long as it is ahead, and a monitor
             # that fails green is worse than no monitor. Anything malformed
-            # still files, under "?": a bad line must not kill the ingest, since
-            # `scan` has already moved its offsets past the events in it.
+            # still files, under "?": a bad heartbeat must not kill the ingest,
+            # because `scan` has already moved its offsets past the events in
+            # the same batch. (A line that is not a JSON object at all still
+            # raises, exactly as it does on main.)
             beat = ev["heartbeat"]
             name = beat.get("host") if isinstance(beat, dict) else None
             name = name if isinstance(name, str) and name else "?"
@@ -1356,6 +1360,10 @@ def machines(con) -> list:
         seen = {r[0]: r[1] for r in con.execute("SELECT host, last_seen FROM hosts")}
     used = {r[0]: (r[1], r[2]) for r in con.execute(
         "SELECT host, MAX(ts) last, COUNT(*) n FROM events GROUP BY host")}
+    # Both ends of the window, because a stamp that is not a plausible "now" —
+    # a clock ahead, a corrupted row — must read silent rather than healthy.
+    # Only utcnow() writes this column, so the strings compare as dates.
+    now = utcnow()
     late = (datetime.now(timezone.utc) - timedelta(hours=HOST_LATE_HOURS)) \
         .isoformat(timespec="seconds")
     out = []
@@ -1364,7 +1372,7 @@ def machines(con) -> list:
         out.append({"host": host, "last_seen": seen.get(host), "last_event": last_event,
                     "events": events,
                     "state": "unknown" if host not in seen
-                             else "late" if seen[host] < late else "ok"})
+                             else "ok" if late <= seen[host] <= now else "late"})
     return out
 
 

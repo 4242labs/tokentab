@@ -2,18 +2,20 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Machine } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-/** "3 hours ago", down to the minute — the number matters, the seconds do not. */
+/** "3 hours ago", down to the minute. Rounded down, never up: rounding up puts
+ *  "seen 3h ago" on a machine two and a half hours quiet, next to a dot that is
+ *  still green because the three-hour line has not been crossed. */
 function ago(iso: string | null): string {
   if (!iso) return 'never'
   const t = new Date(iso).getTime()
   // A timestamp the browser cannot parse says nothing; "NaNd ago" pretends it did.
   if (Number.isNaN(t)) return 'unknown'
-  const mins = Math.max(0, Math.round((Date.now() - t) / 60000))
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60000))
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`
-  const hours = Math.round(mins / 60)
+  const hours = Math.floor(mins / 60)
   if (hours < 48) return `${hours}h ago`
-  return `${Math.round(hours / 24)}d ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 const DOT: Record<Machine['state'], string> = {
