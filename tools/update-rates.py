@@ -18,12 +18,14 @@ Two rules keep this from doing damage:
     writes a literal 0 for a price it does not know — 304 of its entries carry
     one — and that is not a free model either. A field is copied only when it
     carries a positive number.
-  * **A price is never overwritten without being kept.** Value is computed when a
-    report is asked for, so a rate cut today would otherwise re-price every day
-    since tokentab started. The outgoing price is appended to price_history.json
-    first, dated with `--as-of` or, failing that, the day this ran — which is not
-    the day the vendor moved, so the lag is priced at the old rate. It is an add,
-    never an edit, which is what makes this safe to run unattended.
+  * **A price is never overwritten without being kept.** Events already stored
+    carry the Value they were priced at, but a backfill, a re-scan or a
+    `reprice` prices a past day from this file — so a rate cut today would
+    otherwise re-price every day since tokentab started. The outgoing price is
+    appended to price_history.json first, dated with `--as-of` or, failing that,
+    the day this ran — which is not the day the vendor moved, so the lag is
+    priced at the old rate. It is an add, never an edit, which is what makes
+    this safe to run unattended.
   * **Local models are never touched.** Their rates are marked `reference` —
     deliberate stand-ins for a comparable hosted model, not quotes — and no
     upstream can have an opinion about them.
@@ -44,6 +46,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import urllib.error
@@ -388,6 +391,29 @@ def self_check() -> int:
                 assert "price_history.json" in str(e), e
             else:
                 raise AssertionError(f"loaded a log it cannot price from: {broken}")
+
+        # price_rows walks the store a chunk at a time, in id order, so a large
+        # store neither reads whole nor holds the write lock for the whole job.
+        # Walking it wrong loses rows quietly: a report is simply short, and
+        # nothing fails. So: more rows than one chunk, and the count has to be
+        # every one of them, twice — once unpriced, once as a full reprice.
+        (Path(d) / "price_history.json").write_text(json.dumps({"history": {}}))
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.executescript(tt.SCHEMA)
+        con.executemany(
+            "INSERT INTO events (id,ts,day,host,source,provider,billing,account,model,"
+            "project,repo,input,output,cache_read,cache_write,cache_write_1h,cash_usd,"
+            f"value_usd) VALUES ({','.join('?' * 18)})",
+            [(f"e{i:05d}", f"{today}T00:00:00Z", today, "h", "s", "openai", "metered", "",
+              "gpt-x", "p", "r", 1_000_000, 0, 0, 0, 0, 0.0, None) for i in range(250)])
+        con.commit()
+        loaded = tt.load_rates()
+        assert tt.price_rows(con, loaded, unpriced_only=True, chunk=100) == 250
+        assert con.execute("SELECT COUNT(*) FROM events WHERE value_usd IS NULL").fetchone()[0] == 0
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 0
+        loaded["models"]["gpt-x"]["input"] *= 2
+        assert tt.price_rows(con, loaded, chunk=100, apply=False) == 250
 
     print("  self-check: all rules hold")
     return 0

@@ -106,6 +106,10 @@ CREATE INDEX IF NOT EXISTS ix_events_project ON events(project);
 -- The pages go on the freelist, so the file stops growing rather than shrinking.
 DROP INDEX IF EXISTS ix_events_plan;
 CREATE INDEX IF NOT EXISTS ix_events_plan_day ON events(plan, account, day);
+-- Every read checks for rows carrying no Value before it adds Values up, and
+-- on a healthy store that question has to be free. Partial, so it holds nothing
+-- at all once the last row is priced.
+CREATE INDEX IF NOT EXISTS ix_events_unpriced ON events(id) WHERE value_usd IS NULL;
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -573,6 +577,14 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
         if stale:
             raise RuntimeError(f"store predates this build (no {', '.join(stale)}); "
                                f"any command that writes will migrate it")
+        # The column can be there and still be empty — that is what the store
+        # looks like between the migration and the backfill, and what it is left
+        # as if the migrating command is killed. Reports add that column up, so
+        # reading it then would answer $0.00 with a straight face and keep doing
+        # it forever. Refusing is the whole point: a reader cannot fix it.
+        if con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone():
+            raise RuntimeError("store has rows carrying no Value — it was migrated but not "
+                               "priced; run `tokentab reprice --apply` to finish it")
         return con
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=timeout)
@@ -590,31 +602,45 @@ def connect(path: Path = DB_PATH, *, write: bool = True, timeout: float = 5.0) -
     # bringing the store up to date, not a separate errand — and they price at
     # the rate of their own day, so this changes no number that was right.
     if con.execute("SELECT 1 FROM events WHERE value_usd IS NULL LIMIT 1").fetchone():
-        price_rows(con, load_rates())
+        n = price_rows(con, load_rates(), unpriced_only=True)
+        # Said out loud: it is the one place a stored number moves without being
+        # asked for, and on a large store it is also why this command paused.
+        print(f"tokentab: priced {n:,} row(s) that carried no Value", file=sys.stderr)
     return con
 
 
-def price_rows(con, rates: dict, *, everything: bool = False, apply: bool = True) -> int:
+def price_rows(con, rates: dict, *, unpriced_only: bool = False, apply: bool = True,
+               chunk: int = 20_000) -> int:
     """Write each row's Value at the list price of its own day. Returns rows changed.
 
     This is the number every report adds up. Computing it at query time instead
     meant a vendor moving a price silently rewrote history — so it is written
-    once, when the event lands, and only ever rewritten deliberately: by
-    `reprice --all`, when a rate turns out to have been wrong.
+    once, when the event lands, and only ever rewritten deliberately, by
+    `reprice`, when a rate turns out to have been wrong.
+
+    A chunk at a time, walking the id order, for two reasons: a million rows
+    read whole is a quarter of a gigabyte, and one commit for all of them holds
+    the write lock for the whole job. sqlite has no shared writers, so a status
+    line or a cron push landing during a backfill would simply die. Committing
+    per chunk hands the lock back constantly instead.
     """
-    where = "" if everything else " WHERE value_usd IS NULL"
-    # Only the rows whose number actually moves, so a `--all` that changes
-    # nothing writes nothing. The cursor is drained before the update runs.
-    changed = []
-    for r in con.execute(f"SELECT id, day, model, provider, input, output, cache_read, "
-                         f"cache_write, cache_write_1h, value_usd FROM events{where}"):
-        v = value_of(r, rates)
-        if r["value_usd"] is None or abs(r["value_usd"] - v) > 1e-12:
-            changed.append((v, r["id"]))
-    if changed and apply:
-        con.executemany("UPDATE events SET value_usd = ? WHERE id = ?", changed)
-        con.commit()
-    return len(changed)
+    where = " AND value_usd IS NULL" if unpriced_only else ""
+    q = (f"SELECT id, day, model, provider, input, output, cache_read, cache_write, "
+         f"cache_write_1h, value_usd FROM events WHERE id > ?{where} ORDER BY id LIMIT ?")
+    last, total = "", 0
+    while True:
+        rows = con.execute(q, (last, chunk)).fetchall()
+        if not rows:
+            return total
+        last = rows[-1]["id"]
+        # Only the rows whose number actually moves, so a reprice that changes
+        # nothing writes nothing. The cursor is drained before the update runs.
+        changed = [(v, r["id"]) for r, v in ((r, value_of(r, rates)) for r in rows)
+                   if r["value_usd"] is None or abs(r["value_usd"] - v) > 1e-12]
+        total += len(changed)
+        if changed and apply:
+            con.executemany("UPDATE events SET value_usd = ? WHERE id = ?", changed)
+            con.commit()
 
 
 def cmd_ingest(args) -> int:
@@ -673,14 +699,15 @@ def cmd_reprice(args) -> int:
     correction has to be asked for, not arrive with a price change.
     """
     con = connect(Path(args.db).expanduser() if args.db else DB_PATH)
-    n = price_rows(con, load_rates(), everything=args.all, apply=args.apply)
-    scope = "every row" if args.all else "the rows carrying no Value"
+    # Every row, always. A scope of "only the ones carrying no Value" would be
+    # empty by the time it ran: opening the store for writing fills those in.
+    n = price_rows(con, load_rates(), apply=args.apply)
     if not n:
-        print(f"reprice: {scope} already priced as the rates say. Nothing to do.")
+        print("reprice: every row already priced as the rates say. Nothing to do.")
     elif args.apply:
-        print(f"reprice: {n:,} row(s) rewritten from {scope}.")
+        print(f"reprice: {n:,} row(s) rewritten.")
     else:
-        print(f"reprice: {n:,} row(s) of {scope} would change — re-run with --apply.")
+        print(f"reprice: {n:,} row(s) would change — re-run with --apply.")
     return 0
 
 
@@ -1244,7 +1271,7 @@ def cmd_report(args) -> int:
     return 0
 
 
-def statusline_numbers(con, rates: dict, plans: dict) -> dict:
+def statusline_numbers(con, plans: dict) -> dict:
     """Today and the current cycle — the three numbers a status line needs.
 
     `summarise` answers the same question, but to do it builds eight breakdown
@@ -1296,7 +1323,7 @@ def cmd_statusline(args) -> int:
         # mistyped path, must not migrate or index one, and must not wait on one
         # `ingest` is mid-commit on.
         con = connect(path, write=False, timeout=0.2)
-        n = statusline_numbers(con, load_rates(), load_plans())
+        n = statusline_numbers(con, load_plans())
     # SystemExit is not an Exception. A config file this cannot read raises one,
     # and the whole point of this guard is that no file can break a prompt.
     except (Exception, SystemExit) as exc:  # never break the prompt
@@ -1350,7 +1377,7 @@ def cmd_verify(args) -> int:
     print("\nstatusline agrees with report — same cycle, same numbers")
     cyc = resolve_period("cycle", None, None, plans)
     rep = summarise(con, rates, plans, cyc, {k: None for k in FILTER_COLS})["headline"]
-    sl = statusline_numbers(con, rates, plans)
+    sl = statusline_numbers(con, plans)
     for label, a, b in (("cash", sl["cash"], rep["cash_usd"]),
                         ("value", sl["value"], rep["value_usd"])):
         flag = "PASS" if abs(a - b) < 0.01 else "FAIL"
@@ -1376,15 +1403,14 @@ def cmd_verify(args) -> int:
     #     they were written from. They agree until someone corrects a rate, and
     #     then they must be made to agree again on purpose rather than quietly.
     print("\nstored Values agree with the rates they were priced from")
-    unpriced = con.execute("SELECT COUNT(*) n FROM events WHERE value_usd IS NULL").fetchone()["n"]
-    stale = price_rows(con, rates, everything=True, apply=False)
+    # No count of rows carrying no Value: opening the store for writing, which
+    # this did, has already filled every one of them in.
+    stale = price_rows(con, rates, apply=False)
     total_rows = con.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
     print(f"  {total_rows - stale:,} of {total_rows:,} row(s) hold the Value today's rates give them")
-    if unpriced:
-        print(f"  ! {unpriced:,} row(s) carry no Value at all")
     if stale:
         print(f"  ! {stale:,} row(s) would price differently now — a rate changed after they "
-              f"were written. Deliberate: run `tokentab reprice --all --apply`. Not "
+              f"were written. Deliberate: run `tokentab reprice --apply`. Not "
               f"deliberate: the rate that moved is the one to look at.")
     ok &= not stale
     print(f"  {'FAIL' if stale else 'PASS'}")
@@ -1546,9 +1572,6 @@ def main(argv=None) -> int:
     s.set_defaults(func=cmd_statusline)
 
     s = sub.add_parser("reprice", help="rewrite stored Values from the current rates")
-    s.add_argument("--all", action="store_true",
-                   help="every row, not only the ones carrying no Value — use after correcting "
-                        "a rate that was wrong when the usage was priced")
     s.add_argument("--apply", action="store_true", help="write it (dry run by default)")
     s.add_argument("--db")
     s.set_defaults(func=cmd_reprice)

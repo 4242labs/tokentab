@@ -171,7 +171,7 @@ tokentab backfill             # scan everything on disk, ignoring saved offsets
 tokentab push --server <host>
 tokentab ingest               # NDJSON on stdin -> SQLite
 tokentab adopt [--apply]      # stamp accounts onto pre-account events (dry run by default)
-tokentab reprice [--all] [--apply]   # rewrite stored Values from the current rates
+tokentab reprice [--apply]    # rewrite stored Values from the current rates
 tokentab serve --bind <addr> --port 8899
 tokentab report --preset cycle [--project foo] [--provider anthropic] … [--json]
 tokentab statusline           # one line of current spend, for a prompt or status bar
@@ -219,7 +219,7 @@ normally recorded: the amount is on the record, and the price list is kept
 separately so a period can be re-run when a price turns out to have been wrong.
 
 `rates.json` is today's price list, `price_history.json` is what those prices
-used to be, and `tokentab reprice --all --apply` is the one deliberate way a
+used to be, and `tokentab reprice --apply` is the one deliberate way a
 stored number changes. `tokentab verify` fails when the two disagree, so a rate
 edited by hand is reported rather than quietly ignored.
 
