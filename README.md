@@ -214,7 +214,7 @@ priceable, and still belongs to a model `rates.json` prices today.
 | File | What |
 |:--|:--|
 | `rates.json` | Published list prices per million tokens — what each model costs *today*. Sources are recorded in the file. |
-| `price_history.json` | What those prices used to be. Each record ends on the day a price moved, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py` when it rewrites a price — a hand edit, the fallbacks, the aliases and the local reference rates are not logged and still re-price all history. Empty until something moves. |
+| `price_history.json` | What those prices used to be. Each record ends on the day a price stopped applying, and prices every day before it, so a report of last month keeps last month's numbers. Written by `tools/update-rates.py` when it rewrites a price — dated `--as-of` or, failing that, the day the tool ran, which is not the day the vendor moved — a hand edit, the fallbacks, the aliases and the local reference rates are not logged and still re-price all history. Empty until something moves. |
 | `plans.json` | Flat-plan templates (`monthly_usd`, `cycle_day`, `active_from`/`active_to`), per-account overrides, host display names, attribution roots. **Gitignored** — it names your accounts. Start from `plans.example.json`. |
 
 Environment overrides: `TOKENTAB_DB`, `TOKENTAB_STATE`, `TOKENTAB_CONFIG`,
@@ -248,9 +248,10 @@ silent:
 - **A price is never overwritten without being kept.** Value is computed when a
   report is asked for, so a rate cut today would otherwise re-price every day
   since tokentab started. The outgoing price is appended to `price_history.json`
-  first, dated with the day it stopped applying — an add, never an edit, and a
-  second run on the same day changes nothing, since the record it already wrote
-  describes those days correctly.
+  first, dated `--as-of` or, failing that, the day the tool ran — which is not
+  the day the vendor moved, so pass the real date when you know it. It is an add,
+  never an edit: a second run on the same date changes nothing, since the record
+  it already wrote describes those days correctly.
 - **Local models are never touched** — their rates are `reference` stand-ins,
   not quotes, and no upstream has an opinion about them.
 - **A model it cannot price is not added.** tokentab values every model on an

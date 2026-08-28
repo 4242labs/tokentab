@@ -21,8 +21,9 @@ Two rules keep this from doing damage:
   * **A price is never overwritten without being kept.** Value is computed when a
     report is asked for, so a rate cut today would otherwise re-price every day
     since tokentab started. The outgoing price is appended to price_history.json
-    first, dated with the day it stopped applying — an add, never an edit, which
-    is what makes this safe to run unattended.
+    first, dated with `--as-of` or, failing that, the day this ran — which is not
+    the day the vendor moved, so the lag is priced at the old rate. It is an add,
+    never an edit, which is what makes this safe to run unattended.
   * **Local models are never touched.** Their rates are marked `reference` —
     deliberate stand-ins for a comparable hosted model, not quotes — and no
     upstream can have an opinion about them.
@@ -360,6 +361,34 @@ def self_check() -> int:
         assert tt.value_of({**old_day, "day": today}, dated) == 1.0
         assert tt.value_of({k: v for k, v in old_day.items() if k != "day"}, dated) == 1.0
 
+        # Several records for one model, written out of order — the file is
+        # hand-editable and nothing about it is sorted. load_rates is what puts
+        # them in order, and without that the lookup returns the first record it
+        # happens to meet, which understates a past day without failing anything.
+        tt.CONFIG_DIR = Path(d)
+        (Path(d) / "price_history.json").write_text(json.dumps({"history": {"gpt-x": [
+            {"until": "2026-06-01", "input": 30.0, "output": 0.0},
+            {"until": "2026-02-01", "input": 10.0, "output": 0.0},
+            {"until": "2026-04-01", "input": 20.0, "output": 0.0},
+        ]}}))
+        loaded = tt.load_rates()
+        priced = [tt.value_of({**old_day, "day": day}, loaded) for day in
+                  ("2026-01-15", "2026-02-01", "2026-03-31", "2026-04-01", "2026-06-01", None)]
+        assert priced == [10.0, 20.0, 20.0, 30.0, 1.0, 1.0], priced
+
+        # And a log that would otherwise surface as a traceback out of `report`
+        # says which file and what is wrong with it instead.
+        for broken in ({"gpt-x": {}}, {"gpt-x": [{"input": 1.0, "output": 1.0}]},
+                       {"gpt-x": [{"until": "2026-06-01T00:00:00Z", "input": 1.0, "output": 1.0}]},
+                       {"gpt-x": [{"until": "2026-06-01", "output": 1.0}]}):
+            (Path(d) / "price_history.json").write_text(json.dumps({"history": broken}))
+            try:
+                tt.load_rates()
+            except SystemExit as e:
+                assert "price_history.json" in str(e), e
+            else:
+                raise AssertionError(f"loaded a log it cannot price from: {broken}")
+
     print("  self-check: all rules hold")
     return 0
 
@@ -412,6 +441,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source", default=SOURCE,
                     help="LiteLLM price table — a URL, or a path to a saved copy")
     ap.add_argument("--rates", default=str(RATES))
+    ap.add_argument("--as-of", metavar="YYYY-MM-DD",
+                    help="the day the new prices took effect. Defaults to today, which is the "
+                         "day this ran — every day between the vendor's change and this run is "
+                         "then priced at the old rate. Pass the real date when you know it.")
     args = ap.parse_args(argv)
     if args.self_check:
         return self_check()
@@ -562,7 +595,10 @@ def main(argv: list[str] | None = None) -> int:
     # keep, and neither does a change that moved no number (a dropped flag).
     moved = [(n, own["models"][n]) for n, rate in changes if n in own["models"]
              and any(abs(own["models"][n].get(f, -1) - rate.get(f, -1)) > 1e-9 for f in FIELDS)]
-    logged = log_past(path.with_name("price_history.json"), moved, today)
+    effective = args.as_of or today
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", effective):
+        raise SystemExit(f"--as-of wants a YYYY-MM-DD date, not {effective!r}")
+    logged = log_past(path.with_name("price_history.json"), moved, effective)
 
     try:
         tmp = path.with_name(path.name + ".tmp")  # an interrupt must not truncate it
@@ -573,7 +609,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n  wrote {path} — {len(changes)} model(s), updated {today}.")
     if logged:
         print(f"  {logged} outgoing price(s) logged to price_history.json — days before "
-              f"{today} keep pricing at them.")
+              f"{effective} keep pricing at them."
+              + ("" if args.as_of else "  (--as-of sets that date; it is today by default, "
+                                       "which is when this ran, not when the vendor moved.)"))
     print()
     return 1 if missed else 0
 

@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 MIGRATIONS = (("account", "ALTER TABLE events ADD COLUMN account TEXT NOT NULL DEFAULT ''"),)
 
 TOKEN_COLS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
+DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 # ---------------------------------------------------------------- config
@@ -135,6 +136,20 @@ def load_rates() -> dict:
         # rate without a word — the exact failure this file exists to prevent.
         raise SystemExit(f"tokentab: {CONFIG_DIR / 'price_history.json'} is unreadable "
                          f"({exc}) — past prices cannot be applied. Fix or delete it.")
+    # Checked here rather than where it is read: every one of these would
+    # otherwise surface as a traceback out of `report`, from a file a human is
+    # invited to edit. The date is compared as a string, so a date that is not
+    # one — or one carrying a time — silently moves the boundary.
+    for model, recs in past.items():
+        if not isinstance(recs, list):
+            raise SystemExit(f"tokentab: price_history.json — {model} is not a list of prices")
+        for r in recs:
+            if not isinstance(r, dict) or not DAY_RE.fullmatch(str(r.get("until", ""))):
+                raise SystemExit(f"tokentab: price_history.json — {model} has a price with no "
+                                 f"YYYY-MM-DD `until` date")
+            if not all(isinstance(r.get(f), (int, float)) for f in ("input", "output")):
+                raise SystemExit(f"tokentab: price_history.json — {model}'s price ending "
+                                 f"{r['until']} has no numeric input and output")
     rates["_history"] = {m: sorted(v, key=lambda r: r["until"]) for m, v in past.items()}
     return rates
 
@@ -714,10 +729,9 @@ def value_of(row, rates: dict) -> float:
     cols = row.keys()
     r = rate_for(row["model"], rates,
                  row["provider"] if "provider" in cols else None,
-                 # Rows that are already an aggregate over several days carry no
-                 # day and price at the current rate. Every caller that can group
-                 # by day does; see `agg` in summarise for the one that only does
-                 # so once a price has actually moved.
+                 # Every caller that can group by day does. A row without one is
+                 # an aggregate spanning several — `verify`'s hand-built spot
+                 # check — and prices at the current rate.
                  row["day"] if "day" in cols else None)
     return (
         row["input"] * r["input"]
@@ -1230,7 +1244,9 @@ def cmd_statusline(args) -> int:
         # `ingest` is mid-commit on.
         con = connect(path, write=False, timeout=0.2)
         n = statusline_numbers(con, load_rates(), load_plans())
-    except Exception as exc:  # never break the prompt
+    # SystemExit is not an Exception. A config file this cannot read raises one,
+    # and the whole point of this guard is that no file can break a prompt.
+    except (Exception, SystemExit) as exc:  # never break the prompt
         if os.environ.get("TOKENTAB_DEBUG"):
             print(f"tokentab statusline: {exc}", file=sys.stderr)
         return 0
@@ -1310,11 +1326,11 @@ def cmd_verify(args) -> int:
     #     toss, and a record for a model that has since left rates.json prices
     #     history nothing can see a current rate for.
     past = rates.get("_history", {})
-    print("\ndated prices — every past rate is reachable, unique, and prices the same fields")
+    print("\ndated prices — every past rate is reachable, uniquely dated, and priceable")
     today = datetime.now(timezone.utc).date().isoformat()
     first_day = con.execute("SELECT MIN(day) d FROM events").fetchone()["d"]
     flags = {"estimated", "reference"}
-    bad, records, live = [], 0, 0
+    bad, thin, records, live = [], [], 0, 0
     for model, recs in sorted(past.items()):
         records += len(recs)
         # The log is keyed by the name `rate_for` resolves to, and it looks there
@@ -1336,13 +1352,20 @@ def cmd_verify(args) -> int:
             if not {"input", "output"} <= r.keys():
                 bad.append(f"{model}: the price ending {r['until']} has no input/output pair")
             elif charged - r.keys():
-                bad.append(f"{model}: the price ending {r['until']} says nothing about "
-                           f"{', '.join(sorted(charged - r.keys()))} — those value at zero")
+                # Not a failure: a vendor that started charging for cache writes
+                # leaves exactly this, and the record is right — those fields
+                # cost nothing then. Worth saying, since a hand-truncated record
+                # looks identical and values real traffic at zero.
+                thin.append(f"{model}: the price ending {r['until']} says nothing about "
+                            f"{', '.join(sorted(charged - r.keys()))} — those value at zero "
+                            f"on the days it covers")
             if r["until"] > today:
                 bad.append(f"{model}: a past price ending {r['until']} has not stopped applying")
             live += bool(first_day and r["until"] > first_day)
     print(f"  {records} past price(s) across {len(past)} model(s); "
           f"{live} of them price a day this store actually holds")
+    for line in thin:
+        print(f"  · {line}")
     for line in bad:
         print(f"  ! {line}")
     ok &= not bad
