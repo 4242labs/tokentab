@@ -1,7 +1,7 @@
 /*
  * 42labs Design System — tokens.css (auto-generated; DO NOT EDIT).
- * Version 0.9.0 · commit 8da0b11 · source-touched 2026-08-17T16:07:38-03:00
- * Source: https://github.com/4242labs/design-system/blob/8da0b11/src/app/globals.css
+ * Version 1.0.0 · commit 8572027 · source-touched 2026-08-30T00:35:55-03:00
+ * Source: https://github.com/4242labs/design-system/blob/8572027/src/app/globals.css
  * Contains layers 1-3 of globals.css (raw palette + semantic + scale).
  * Layer 4 (@theme inline Tailwind bridge) and layer 5 (layout primitives) are NOT included.
  */
@@ -44,8 +44,15 @@
   --warm-975: #100D09;
   --gray-150: #F1F1F0;
   --ink-175: #F0F3F5;
+  --ink-200: #EEF1F3;
+  --ink-225: #ECF0F2;
+  --ink-250: #E8ECEF;
+  --ink-275: #E3E9ED;
+  --ink-300: #D1DAE1;
   --ink-400: #C3CDD6;
+  --ink-450: #AFBFCA;
   --ink-500: #94A2AD;
+  --ink-550: #7993A6;
   --ink-600: #6C7C89;
   --ink-750: #33414E;
   --ink-800: #2B3540;
@@ -107,11 +114,11 @@
   --bp-lg: 1024px;
   --surface: var(--warm-0);
   --surface-alt: var(--warm-0);
-  --surface-muted: var(--warm-150);
-  --surface-subtle: var(--gray-150);
-  --border: var(--warm-300);
-  --border-subtle: var(--warm-200);
-  --border-control: var(--warm-500);
+  --surface-muted: var(--ink-225);
+  --surface-subtle: var(--ink-200);
+  --border: var(--ink-300);
+  --border-subtle: var(--ink-275);
+  --border-control: var(--ink-550);
   --fg: var(--warm-900);
   --fg-2: var(--warm-700);
   --fg-muted: var(--warm-600);
