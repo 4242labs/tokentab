@@ -7,7 +7,7 @@
     "openai": "https://developers.openai.com/api/docs/pricing",
     "local": "reference proxy — see _local_note"
   },
-  "_local_note": "Local (llama-swap) models have no list price. They are priced at the going rate of a comparable hosted open-weights model so that 'Value' answers 'what did self-hosting save me'. Clearly reference figures, not quotes.",
+  "_local_note": "Local (llama-swap) models have no list price. They are priced at the going rate of a comparable hosted open-weights model so that 'Value' answers 'what the same work would have cost hosted'. Clearly reference figures, not quotes.",
 
   "models": {
     "claude-fable-5":   {"input": 10.0, "output": 50.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 1.00},

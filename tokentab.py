@@ -590,7 +590,14 @@ def scan_llama_swap(state: ScanState, host: str):
 def cmd_scan(args) -> int:
     plans = load_plans()
     host = host_name(plans)
-    roots = plans.get("roots", {}).get("paths", ["~/42labs"])
+    roots = plans.get("roots", {}).get("paths", [])
+    if not roots:
+        print(
+            "scan: no roots configured. Set roots.paths in plans.json to the "
+            "directories your code lives in, or every event lands in 'ad-hoc'.",
+            file=sys.stderr,
+        )
+        return 1
     state = ScanState(STATE_DIR / "scan-state.json", fresh=args.all)
     out = sys.stdout
     n = 0

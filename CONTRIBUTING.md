@@ -14,8 +14,9 @@ disinterest. Plan accordingly before you invest a weekend.
 - **Small, focused pull requests.** One logical change.
 - **A rate correction.** `rates.json` records its sources; if a published price
   changed, a PR that updates the number *and* its source line is the easiest kind
-  to merge. Value is computed at query time, so a corrected rate re-prices all
-  history.
+  to merge. Value is written onto each event at the rate in force the day the usage
+  happened, so a corrected rate applies to new events only. Re-pricing history is
+  something you run on purpose, with `reprice --apply`.
 - **A new source.** The collector reads transcripts other tools already write.
   Another CLI that leaves a parseable log on disk is a natural fit.
 - **Documentation** — typos, unclear passages, missing setup steps.
