@@ -26,7 +26,7 @@ No vendor API key. No proxy in front of your agent. No credentials stored.
 
 | Number | Meaning |
 |:--|:--|
-| **Cash out** | Real money in the period: flat plan fees + metered API charges |
+| **Cash out** | The plan fees you told it about, for the period, added up |
 | **Allocated cost** | A plan's fee split across projects by token share — *accounting, not measurement* |
 | **Value** | The same usage priced at published API list rates, for subscription and local traffic alike |
 
@@ -58,7 +58,7 @@ stored or logged.** A host that switches accounts stamps only what it scans
 afterwards; history keeps the account it was scanned under.
 
 Filtering by account keeps *Cash out* a cash figure — an account's own plan fee is
-real money for that account. Only project/repo/model/machine/source narrowing
+that account's fee, undivided. Only project/repo/model/machine/source narrowing
 switches the card to allocated.
 
 **Cancelled on an unknown date:** set `"active_to": "auto"` and the end is inferred
