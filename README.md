@@ -132,7 +132,7 @@ is always safe.
 ## Install
 
 ```sh
-git clone <this repo> tokentab && cd tokentab
+git clone https://github.com/4242labs/tokentab && cd tokentab
 cp plans.example.json plans.json      # then edit: your plans, accounts, roots
 ```
 
@@ -309,7 +309,8 @@ with nothing to show for it.
 `--self-check` runs the assertions behind those rules against a fixture,
 including one end-to-end `--apply` into a temporary file. A dry run exits 1 when
 it finds drift, so it can gate CI on its own. The fetch lives here and not in
-`tokentab.py`, which makes no network calls at all.
+`tokentab.py`, which makes no outbound network calls. It binds a local listener to
+serve the dashboard, and shells out to `ssh` to push, both only when you ask it to.
 
 ## Architecture
 
