@@ -68,9 +68,9 @@ export function HeadlineCards({ h }: { h: Headline }) {
         foot={
           allocated
             ? 'allocated share of the plan fee — not a cash figure'
-            : 'real money in the period'
+            : 'plan fees for the period'
         }
-        help="Real money that left the account: flat plan fees plus metered API charges. Narrowing by project, repo, model, machine or source switches this to an allocated share, because a flat plan has no per-call price."
+        help="The plan fees you told it about, for this period, added up. Narrowing by project, repo, model, machine or source switches this to an allocated share, because a flat plan has no per-call price."
       />
       <Figure
         label="Allocated cost"

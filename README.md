@@ -1,6 +1,6 @@
 <img src=".github/logomark.svg" alt="42labs" width="56" />
 
-# tokentab
+# TokenTab
 
 [![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
 [![Maintenance](https://img.shields.io/badge/maintenance-passively--maintained-yellowgreen.svg)](CONTRIBUTING.md)
@@ -14,7 +14,7 @@
 
 Every usage dashboard you can buy meters API keys. Almost nobody pays for coding
 agents that way any more: the spend is a handful of $20–$200 subscriptions, and
-a subscription has no per-call price to meter. tokentab reads the transcripts
+a subscription has no per-call price to meter. TokenTab reads the transcripts
 the CLIs already write to disk, prices the usage at published list rates, and
 splits each flat fee across the projects that consumed it.
 
@@ -207,12 +207,12 @@ change a schema, build an index inside your prompt, or roll back the journal of
 an `ingest` you just killed. It waits about 200 ms for a store a write is
 holding, and prints nothing at all unless it can print the whole line: a
 missing, corrupt, or mid-write store leaves the prompt alone rather than
-painting an error over it on every render. A store older than your tokentab
+painting an error over it on every render. A store older than your TokenTab
 also goes blank, until the next command that writes migrates it. Set
 `TOKENTAB_DEBUG=1` to see why a line is blank.
 
 (The one thing a read-only open still writes is the `-shm` file of a store in
-WAL mode, which sqlite requires to read one at all. tokentab never turns WAL on;
+WAL mode, which sqlite requires to read one at all. TokenTab never turns WAL on;
 if you have, note that a WAL store in a read-only directory cannot be read.)
 
 `tokentab verify` checks that per-project allocations sum back to the allocatable
@@ -288,7 +288,7 @@ silent:
   those days correctly.
 - **Local models are never touched** — their rates are `reference` stand-ins,
   not quotes, and no upstream has an opinion about them.
-- **A model it cannot price is not added.** tokentab values every model on an
+- **A model it cannot price is not added.** TokenTab values every model on an
   input and an output rate, so `--add` refuses one upstream quotes neither for
   (every embedding model) rather than writing it half-priced. A model added on
   a partial quote is written `"estimated": true` — the fields nobody published
@@ -337,7 +337,7 @@ to drift out of step with the product.
 
 Two filters at once are not precomputed (the matrix squares); the demo drops the
 extras and says so on the page. Filter combinations aside, every number in the
-demo is what tokentab would actually report for that data.
+demo is what TokenTab would actually report for that data.
 
 The dataset is generated, not committed, because the presets are relative to
 today — a fixture baked in June would open on an empty billing cycle. The
