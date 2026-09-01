@@ -11,7 +11,7 @@ canon text alone is explicitly inert.
 | `linear-card-lint.sh` | `PreToolUse` · `mcp__linear__save_issue` | Card contract (`skill-linear-cards.md`): agent state vocabulary, fleet assignee, owner line + signature + universal label on create |
 | `telegram-send-check.sh` | `PreToolUse` · `Bash` | Channel registry (`telegram-channels.md`): a send's chat ID must equal the registered channel for this project, or it is refused |
 | `gate-ledger-gate.sh` | `PreToolUse` · `Bash` | Gate ledger (`skill-gate-ledger.md`): PR/merge/deploy commands blocked while the active block is missing prior-stage records |
-| `persona-anchor-inject.sh` | `SessionStart` · `compact` | Persona persistence (`principles-base.md` §17): re-injects `*-anchor.md` files after every compaction |
+| `persona-anchor-inject.sh` | `SessionStart` · `compact` | Persona persistence (`principles-base.md` §17): re-injects `~/.agent-anchors/{project}/*.md` after every compaction |
 
 ## Per-project configuration
 
