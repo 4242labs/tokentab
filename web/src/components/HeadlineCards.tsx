@@ -68,9 +68,9 @@ export function HeadlineCards({ h }: { h: Headline }) {
         foot={
           allocated
             ? 'allocated share of the plan fee — not a cash figure'
-            : 'real money in the period'
+            : 'plan fees for the period'
         }
-        help="Real money that left the account: flat plan fees plus metered API charges. Narrowing by project, repo, model, machine or source switches this to an allocated share, because a flat plan has no per-call price."
+        help="The plan fees you told it about, for this period, added up. Narrowing by project, repo, model, machine or source switches this to an allocated share, because a flat plan has no per-call price."
       />
       <Figure
         label="Allocated cost"
@@ -91,7 +91,7 @@ export function HeadlineCards({ h }: { h: Headline }) {
         label="Tokens"
         value={short(h.tokens)}
         foot={`${num(h.events)} calls`}
-        help="Input, output, cache read and cache write, summed. The same basis used to allocate flat-plan fees."
+        help="Input, output, cache read and cache writes of both durations, summed. The same basis used to allocate flat-plan fees."
       />
     </div>
   )

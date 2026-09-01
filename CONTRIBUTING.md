@@ -1,6 +1,6 @@
 # Contributing
 
-**Status: passively maintained.** tokentab runs in production at 42labs and gets
+**Status: passively maintained.** TokenTab runs in production at 42labs and gets
 commits regularly — but it is not a staffed product. There is no support rota and
 no SLA. Issues and pull requests are welcome and genuinely read; expect a reply in
 weeks rather than days, and sometimes not at all. That is capacity, not
@@ -62,7 +62,7 @@ Two things this repo is strict about, because both fail quietly:
 
 ## Licensing
 
-tokentab is dual-licensed: AGPL-3.0 for open source, commercial terms on request —
+TokenTab is dual-licensed: AGPL-3.0 for open source, commercial terms on request —
 see [LICENSING.md](LICENSING.md).
 
 **By submitting a pull request you grant 42labs the right to distribute your
