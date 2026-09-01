@@ -37,7 +37,7 @@ the allocated figure, turns amber, goes dashed and carries an `ALLOCATED` badge.
 
 ![One project selected: the Cash out card has switched to the allocated share, amber and dashed, with an ALLOCATED badge and a note explaining why](docs/allocated.png)
 
-**Allocation basis:** total tokens (input + output + cache read + cache write) per
+**Allocation basis:** total tokens (input + output + cache read + cache writes of both durations) per
 project, per billing cycle. **Billing periods are plan cycles** (`cycle_day` →
 same day next month), not calendar months, and fees are never pro-rated.
 

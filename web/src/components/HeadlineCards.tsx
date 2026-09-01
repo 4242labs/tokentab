@@ -91,7 +91,7 @@ export function HeadlineCards({ h }: { h: Headline }) {
         label="Tokens"
         value={short(h.tokens)}
         foot={`${num(h.events)} calls`}
-        help="Input, output, cache read and cache write, summed. The same basis used to allocate flat-plan fees."
+        help="Input, output, cache read and cache writes of both durations, summed. The same basis used to allocate flat-plan fees."
       />
     </div>
   )
