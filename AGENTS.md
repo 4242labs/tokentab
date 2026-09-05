@@ -17,7 +17,15 @@ allocated number as cash: under a filter the card switches figure, turns amber, 
 carries an `ALLOCATED` badge. Any change that blurs those three breaks the thing the tool exists
 to say.
 
-**Open source, AGPL-3.0, passively maintained.** The public `README.md` is the user documentation.
+**Open source, dual-licensed** — AGPL-3.0, commercial on request (`LICENSING.md`) — and passively
+maintained. The public `README.md` is the user documentation.
+
+## How work flows
+
+Branch, work from a worktree under `.worktrees/`, open a PR against `main`. The `ds`
+token-compliance check and the project self-check both run. The `.claude/` CLU guards enforce
+worktree-only writes and refuse a self-merge, but only while a CLU run is active. `main` is not
+branch-protected, so no check is required yet.
 
 The sibling folder `~/42labs/tokentab-meta/` carries this project's meta side — its `AGENTS.md`,
 `docs/` and logs. It is a plain folder, not a repository.
