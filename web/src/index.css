@@ -94,21 +94,16 @@
   --font-heading: var(--font-heading);
   --font-mono: var(--font-mono);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  /* One 4px corner in DS 2.0.0 — no derived radius ladder. */
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
   --radius-lg: var(--radius);
 
-  /* Elevation — DS 0.9.0. Tailwind owns the `--shadow-*` namespace, so the DS
-     names its raw rungs `--elev-*` and consumers pin them into Tailwind's slots
-     (the same call the DS makes for spacing). Every primitive already writing
-     shadow-xs/sm/md inherits DS elevation with no component edit. Required, not
-     optional: without it the re-pulled Card draws a DS-subtle border underneath
-     Tailwind's default, harsher shadow — worse than either state alone.
-     2xs / lg / xl / 2xl stay at Tailwind's defaults; nothing here uses them. */
-  --shadow-xs: var(--elev-0);
-  --shadow-sm: var(--elev-1);
-  --shadow-md: var(--elev-2);
-  --shadow-lg: var(--elev-3);
+  /* DS 2.0.0 removes elevation: structural hairlines replace shadows. */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
 
   --animate-pulse-skeleton: pulse-skeleton 1.5s ease-in-out infinite;
 }
