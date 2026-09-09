@@ -220,17 +220,49 @@ svc_launchd() {
   LA="$HOME/Library/LaunchAgents"
   mkdir -p "$LA"
 
-  # launchd has no oneshot-timer split: StartInterval on the agent itself is the
-  # timer. A serve agent would want KeepAlive instead — not written here because
-  # the only Mac in the fleet collects, it does not serve.
+  # launchd uses one agent for each job. The server stays alive; the collector
+  # runs at an interval. Both are rewritten and reloaded on every install, so
+  # re-running the installer really is an upgrade on macOS too.
   if [ "$DO_SERVE" = 1 ]; then
-    echo "install.sh: --serve is not implemented for launchd (no Mac serves)" >&2
-    exit 2
+    P="$LA/com.42labs.tokentab-serve.plist"
+    cat > "$P" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.42labs.tokentab-serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN/tokentab</string>
+    <string>serve</string>
+    <string>--bind</string>
+    <string>$BIND</string>
+    <string>--port</string>
+    <string>$PORT</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$STATE/serve.log</string>
+  <key>StandardErrorPath</key><string>$STATE/serve.log</string>
+</dict></plist>
+EOF
+    launchctl bootout "gui/$(id -u)/com.42labs.tokentab-serve" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$P"
+    say "service   com.42labs.tokentab-serve -> http://$(hostname -s):$PORT/"
   fi
 
   if [ "$DO_COLLECT" = 1 ]; then
-    [ -n "$SERVER" ] || { echo "install.sh: --collect on macOS needs --server HOST" >&2; exit 2; }
     P="$LA/com.42labs.tokentab-collect.plist"
+    if [ -n "$SERVER" ]; then
+      ARGS="<string>$BIN/tokentab</string>
+    <string>push</string>
+    <string>--server</string>
+    <string>$SERVER</string>"
+    else
+      # The serving Mac collects into its own store. No SSH host is needed.
+      ARGS="<string>/bin/sh</string>
+    <string>-c</string>
+    <string>$BIN/tokentab scan | $BIN/tokentab ingest</string>"
+    fi
     cat > "$P" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -238,10 +270,7 @@ svc_launchd() {
   <key>Label</key><string>com.42labs.tokentab-collect</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$BIN/tokentab</string>
-    <string>push</string>
-    <string>--server</string>
-    <string>$SERVER</string>
+    $ARGS
   </array>
   <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><true/>
