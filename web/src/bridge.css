@@ -75,15 +75,14 @@
    * alias is satisfied by omission. `--input` is a distinct name, so
    * `var(--border-control)` below reads the token value with no cycle.
    */
-  /* --border-control, not --border (DS 0.9.0). `--input` is the control
-     boundary — the Select trigger, the outline Button — and WCAG 1.4.11 wants
-     3:1 for the visual information identifying a component. --border is warm-300
-     at 1.38:1 on white; --border-control is warm-500 at 3.07:1. Card and popover
-     EDGES are out of 1.4.11's scope and correctly keep --border-subtle. */
+  /* --border-control is warm-600 in DS 2.0.0: 5.27:1 on white and 4.64:1 on
+     surface-muted. It is the control boundary; --border remains the decorative
+     hairline. */
   --input: var(--border-control);
   --ring: var(--accent-focus);
 
-  --radius: var(--r-3);
+  /* DS 2.0.0: one 4px corner everywhere. */
+  --radius: var(--r-2);
 
   /* shadcn sidebar contract -> design tokens (mirrors the token layer's own
      mapping). Declared here and re-declared under body.theme-dark below for
@@ -138,7 +137,8 @@
  * `body.theme-dark` directly, so the alias is satisfied by omission; `--radius`
  * isn't themed.
  */
-body.theme-dark {
+body.theme-dark,
+.band-dark {
   --background: var(--surface);
   --foreground: var(--fg);
 
