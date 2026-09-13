@@ -113,7 +113,7 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="min-h-svh bg-background text-foreground">
-        <header className="band-dark sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
+        <header className="band-dark sticky top-0 z-10 border-b border-border bg-background/95 text-foreground backdrop-blur">
           <div className="mx-auto flex max-w-(--w-xl) flex-wrap items-center gap-x-4 gap-y-2 px-(--pad-x) py-4">
             <BrandMark className="size-5" />
             <h1 className="font-heading text-lg font-semibold tracking-tight text-logo-word">
