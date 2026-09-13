@@ -10,9 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fontsource/geist-mono": "^5.2.8",
-    "@fontsource/ibm-plex-sans": "^5.2.8",
-    "@fontsource/space-grotesk": "^5.2.10",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
     "@radix-ui/react-select": "^2.1.6",
     "@radix-ui/react-separator": "^1.1.2",
     "@radix-ui/react-slot": "^1.1.2",
