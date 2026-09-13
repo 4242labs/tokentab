@@ -127,7 +127,7 @@ export default function App() {
             <span className="flex-1" />
             {data && (
               <span className="font-mono text-xs text-muted-foreground">
-                updated {data.updated}
+                Updated {data.updated}
               </span>
             )}
             <ThemeSwitch />
