@@ -1,17 +1,10 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 
-// Fonts, self-hosted (no external/Google runtime request — the dashboard is
-// tailnet-only and must render with no internet at all). Weights match
-// ds-tokens.css: Space Grotesk (heading), IBM Plex Sans (body), Geist Mono (mono).
-import '@fontsource/space-grotesk/500.css'
-import '@fontsource/space-grotesk/600.css'
-import '@fontsource/space-grotesk/700.css'
-import '@fontsource/ibm-plex-sans/400.css'
-import '@fontsource/ibm-plex-sans/500.css'
-import '@fontsource/ibm-plex-sans/600.css'
-import '@fontsource/geist-mono/400.css'
-import '@fontsource/geist-mono/500.css'
+// Fonts are self-hosted by the canonical 42labs Tailwind bridge.
+import '@fontsource-variable/space-grotesk'
+import '@fontsource-variable/ibm-plex-sans'
+import '@fontsource-variable/geist-mono'
 
 // Import order is load-bearing: the vendored 42labs design-system tokens define
 // the raw palette + semantic vars first, the shadcn<->token bridge aliases on
