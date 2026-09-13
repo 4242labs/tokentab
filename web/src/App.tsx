@@ -113,8 +113,8 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="min-h-svh bg-background text-foreground">
-        <header className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
-          <div className="mx-auto flex max-w-[var(--w-xl)] flex-wrap items-center gap-x-4 gap-y-2 px-[var(--pad-x)] py-4">
+        <header className="band-dark sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
+          <div className="mx-auto flex max-w-(--w-xl) flex-wrap items-center gap-x-4 gap-y-2 px-(--pad-x) py-4">
             <BrandMark className="size-5" />
             <h1 className="font-heading text-lg font-semibold tracking-tight text-logo-word">
               TokenTab
@@ -134,7 +134,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="mx-auto flex max-w-[var(--w-xl)] flex-col gap-6 px-[var(--pad-x)] py-6">
+        <main className="mx-auto flex max-w-(--w-xl) flex-col gap-6 px-(--pad-x) py-6">
           <FilterBar
             filters={filters}
             options={options}
@@ -168,7 +168,7 @@ export default function App() {
           {!data && !error ? (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {[0, 1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-32 rounded-xl" />
+                <Skeleton key={i} className="h-32 rounded-sm" />
               ))}
             </div>
           ) : data ? (

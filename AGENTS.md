@@ -27,7 +27,7 @@ token-compliance check and the project self-check both run. The `.claude/` CLU g
 worktree-only writes and refuse a self-merge, but only while a CLU run is active. `main` is not
 branch-protected, so no check is required yet.
 
-The sibling folder `~/42labs/tokentab-meta/` carries this project's meta side — its `AGENTS.md`,
+The sibling folder `../tokentab-meta/` carries this project's meta side — its `AGENTS.md`,
 `docs/` and logs. It is a plain folder, not a repository.
 
 ## Crew

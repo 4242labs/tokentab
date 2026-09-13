@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { cn } from '@/lib/utils'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 
 type Theme = 'light' | 'dark'
 
@@ -12,11 +12,7 @@ function readInitialTheme(): Theme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
-/**
- * A 2-up segmented control (LIGHT / DARK). Toggles `body.theme-dark`, which is
- * what the design tokens and the shadcn bridge key off — the whole palette
- * flips at runtime, no rebuild.
- */
+/** Canonical @42labs/theme-switch contract. */
 export function ThemeSwitch() {
   const [theme, setTheme] = useState<Theme>(() =>
     typeof window === 'undefined' ? 'light' : readInitialTheme(),
@@ -28,27 +24,22 @@ export function ThemeSwitch() {
   }, [theme])
 
   return (
-    <div
-      className="grid grid-cols-2 gap-1 rounded-[var(--r-2)] border border-border bg-background p-1"
-      role="group"
+    <ToggleGroup
+      type="single"
+      spacing={1}
+      value={theme}
+      onValueChange={(value) => {
+        if (value) setTheme(value as Theme)
+      }}
       aria-label="Theme"
+      className="theme-switch grid w-36 grid-cols-2 gap-1 rounded-sm border border-border bg-surface p-1"
     >
-      {(['light', 'dark'] as const).map((t) => (
-        <button
-          key={t}
-          type="button"
-          onClick={() => setTheme(t)}
-          aria-pressed={theme === t}
-          className={cn(
-            'cursor-pointer rounded-[var(--r-2)] border-0 px-2 py-0.5 font-mono text-xs font-medium uppercase tracking-wider transition-colors',
-            theme === t
-              ? 'bg-card text-foreground shadow-sm'
-              : 'bg-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {t}
-        </button>
-      ))}
-    </div>
+      <ToggleGroupItem value="light" aria-label="Light theme" className="h-auto rounded-sm px-2 py-2 font-mono text-xs uppercase tracking-wider text-fg-muted data-[state=on]:bg-surface-alt data-[state=on]:text-fg data-[state=off]:hover:bg-transparent data-[state=off]:hover:text-fg-muted data-[state=on]:hover:bg-surface-alt data-[state=on]:hover:text-fg">
+        Light
+      </ToggleGroupItem>
+      <ToggleGroupItem value="dark" aria-label="Dark theme" className="h-auto rounded-sm px-2 py-2 font-mono text-xs uppercase tracking-wider text-fg-muted data-[state=on]:bg-surface-alt data-[state=on]:text-fg data-[state=off]:hover:bg-transparent data-[state=off]:hover:text-fg-muted data-[state=on]:hover:bg-surface-alt data-[state=on]:hover:text-fg">
+        Dark
+      </ToggleGroupItem>
+    </ToggleGroup>
   )
 }

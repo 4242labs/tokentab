@@ -137,7 +137,8 @@
  * `body.theme-dark` directly, so the alias is satisfied by omission; `--radius`
  * isn't themed.
  */
-body.theme-dark {
+body.theme-dark,
+.band-dark {
   --background: var(--surface);
   --foreground: var(--fg);
 
