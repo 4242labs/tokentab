@@ -6,10 +6,10 @@ import '@fontsource-variable/space-grotesk'
 import '@fontsource-variable/ibm-plex-sans'
 import '@fontsource-variable/geist-mono'
 
-// Import order is load-bearing: the vendored 42labs design-system tokens define
-// the raw palette + semantic vars first, the shadcn<->token bridge aliases on
-// top of those, then Tailwind's layers last so utilities see the bridge vars.
-import '@/ds-tokens.css'
+// Import order is load-bearing: bridge.css pulls in the design-system tokens from
+// the installed package first — raw palette and semantic vars — then aliases the
+// shadcn names on top of them; Tailwind's layers come last so utilities see the
+// bridge vars.
 import '@/bridge.css'
 import '@/index.css'
 
