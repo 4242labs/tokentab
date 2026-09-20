@@ -1,12 +1,19 @@
+/* The design-system tokens, from the installed package rather than a copy in this
+ * tree. It is imported here and not from main.tsx because the compliance gate
+ * requires the import to live in a stylesheet, and because load order is
+ * load-bearing: the raw palette and semantic vars have to land before the aliases
+ * below, which is exactly where this sits. */
+@import "@4242labs/design-system/tokens.css";
+
 /*
  * shadcn (new-york) -> design-token bridge.
  * The only hand-written CSS in the app: this is config (a variable
  * alias map), not bespoke component styling. shadcn's primitives + our
  * hand-authored components consume the --background/--foreground/... vars
  * below; every value on the right is a semantic token from
- * ds-tokens.css. Do not add raw hex here or anywhere else in src/.
+ * the design-system tokens. Do not add raw hex here or anywhere else in src/.
  *
- * The token layer itself switches palettes on `body.theme-dark` (see ds-tokens.css).
+ * The token layer itself switches palettes on `body.theme-dark` (see the design-system tokens).
  * That does NOT make this bridge dark-mode-aware "for free", even though
  * every alias below points at a token var rather than a literal: custom
  * properties are substituted at computed-value time on the element where
@@ -69,7 +76,7 @@
    * literally `--border`. Re-declaring `--border` as
    * `var(--border)` on the same `:root` is a direct self-reference, which
    * CSS defines as invalid at computed-value time (the property would
-   * resolve to nothing, breaking every border in the app). ds-tokens.css
+   * resolve to nothing, breaking every border in the app). the design-system tokens
    * already defines `--border` with exactly the intended value (incl. the
    * `body.theme-dark` override), so no re-declaration is needed here — the
    * alias is satisfied by omission. `--input` is a distinct name, so
@@ -129,11 +136,11 @@
 /*
  * Dark-mode re-resolution (see header comment): identical right-hand sides
  * to the :root block above, just re-declared at `body.theme-dark` scope so
- * each alias picks up the dark tokens ds-tokens.css sets there
+ * each alias picks up the dark tokens the design-system tokens sets there
  * (--surface, --fg, --accent-*, etc.) instead of inheriting the already-
  * resolved light values from :root. `--border`/`--radius` are omitted for
  * the same reason as :root: `--border` would self-reference, and
- * ds-tokens.css already flips the underlying `--border` value under
+ * the design-system tokens already flips the underlying `--border` value under
  * `body.theme-dark` directly, so the alias is satisfied by omission; `--radius`
  * isn't themed.
  */
