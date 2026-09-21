@@ -5,7 +5,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table'
+} from '@4242labs/design-system/components/table'
 import type { BreakdownRow } from '@/lib/api'
 import { short, usd } from '@/lib/format'
 import { cn } from '@/lib/utils'

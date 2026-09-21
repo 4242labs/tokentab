@@ -1,4 +1,4 @@
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@4242labs/design-system/components/tooltip'
 import type { Machine } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
