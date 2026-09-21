@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@4242labs/design-system": "2.4.8",
+    "@4242labs/design-system": "2.4.9",
     "@fontsource-variable/geist-mono": "^5.3.0",
     "@fontsource-variable/ibm-plex-sans": "^5.3.0",
     "@fontsource-variable/space-grotesk": "^5.3.0",
