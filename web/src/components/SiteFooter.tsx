@@ -1,4 +1,4 @@
-import { BrandMark } from '@/components/brand-mark'
+import { BrandMark } from '@4242labs/design-system/components/brand-mark'
 
 /**
  * Provenance footer — licence + source, credit, coffee. Same elements and the

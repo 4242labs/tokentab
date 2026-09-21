@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+/* The package's own shadcn-contract sheet (R8) — imported here, not from
+ * bridge.css, because its `@theme`/`@utility` blocks are Tailwind v4
+ * CSS-first syntax and only get compiled when reachable from the file that
+ * imports "tailwindcss" itself. Its `@layer base` vars never win over
+ * bridge.css's own aliases regardless of import order: cascade layers always
+ * lose to un-layered rules, and bridge.css's :root/body.theme-dark blocks
+ * are deliberately un-layered. */
+@import "@4242labs/design-system/tailwind.css";
+@source "../node_modules/@4242labs/design-system/dist";
+
 /*
  * Tailwind v4 CSS-first config — there is no tailwind.config.js or
  * postcss.config.js. Colours/fonts/radii are declared here as `@theme

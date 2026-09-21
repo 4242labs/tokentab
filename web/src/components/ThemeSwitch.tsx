@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { ThemeSwitch as CanonicalThemeSwitch } from '@/components/ui/theme-switch'
+import { ThemeSwitch as CanonicalThemeSwitch } from '@4242labs/design-system/components/theme-switch'
 
 type Theme = 'light' | 'dark'
 

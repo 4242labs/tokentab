@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Info, TriangleAlert } from 'lucide-react'
 
-import { BrandMark } from '@/components/brand-mark'
+import { BrandMark } from '@4242labs/design-system/components/brand-mark'
 import { BreakdownTable } from '@/components/BreakdownTable'
 import { DailyChart } from '@/components/DailyChart'
 import { FilterBar } from '@/components/FilterBar'
@@ -10,10 +10,10 @@ import { MachinesCard } from '@/components/MachinesCard'
 import { PlansTable } from '@/components/PlansTable'
 import { SiteFooter } from '@/components/SiteFooter'
 import { ThemeSwitch } from '@/components/ThemeSwitch'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Skeleton } from '@/components/ui/skeleton'
-import { TooltipProvider } from '@/components/ui/tooltip'
+import { Alert, AlertDescription } from '@4242labs/design-system/components/alert'
+import { Card, CardContent, CardHeader, CardTitle } from '@4242labs/design-system/components/card'
+import { Skeleton } from '@4242labs/design-system/components/skeleton'
+import { TooltipProvider } from '@4242labs/design-system/components/tooltip'
 import {
   DEMO,
   fetchFilters,

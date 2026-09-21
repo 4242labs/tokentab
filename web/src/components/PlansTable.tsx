@@ -1,4 +1,4 @@
-import { Badge } from '@/components/ui/badge'
+import { Badge } from '@4242labs/design-system/components/badge'
 import {
   Table,
   TableBody,
@@ -6,8 +6,8 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+} from '@4242labs/design-system/components/table'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@4242labs/design-system/components/tooltip'
 import type { PlanRow } from '@/lib/api'
 import { usd } from '@/lib/format'
 import { cn } from '@/lib/utils'
